@@ -1,9 +1,11 @@
 import Poe.Uplc
 import Poe.Emit
 import Poe.Prelude
+import Poe.PlutusData
 import Poe.Translate
 import Poe.Oracle
 import Poe.Lint
 import Poe.Examples.First
 import Poe.Examples.OutOfFragment
 import Poe.Examples.HelloWorld
+import Poe.Examples.DataDecoding

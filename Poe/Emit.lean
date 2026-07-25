@@ -24,12 +24,24 @@ def toHex (b : ByteArray) : String :=
   b.foldl (init := "") fun s byte =>
     s.push (hexDigit (byte / 16)) |>.push (hexDigit (byte % 16))
 
+/-- Matches `uplc`'s own concrete syntax for `Data` literals exactly,
+    verified directly (e.g. `(con data (List [B #61, B #62]))`) — real
+    `Data` also has `Constr`/`Map`/`I`, not modeled here (see
+    `Poe.PlutusData`). -/
+partial def emitDataValue : DataValue → String
+  | .b bytes => s!"B #{toHex bytes}"
+  | .list xs => s!"List [{String.intercalate ", " (xs.map emitDataValue)}]"
+
 def emitConst : Const → String
   | .integer i    => s!"(con integer {i})"
   | .bytestring b => s!"(con bytestring #{toHex b})"
   | .string s     => s!"(con string {repr s})"
   | .bool b       => s!"(con bool {if b then "True" else "False"})"
   | .unit         => "(con unit ())"
+  -- `emitDataValue` itself is unwrapped (matches nested-list-element
+  -- syntax); the top-level `Data` needs one more paren layer around it
+  -- (`(con data (B #..))`, not `(con data B #..)` — checked directly).
+  | .data d       => s!"(con data ({emitDataValue d}))"
 
 def builtinName : Builtin → String
   | .addInteger           => "addInteger"
@@ -47,6 +59,8 @@ def builtinName : Builtin → String
   | .appendString         => "appendString"
   | .ifThenElse           => "ifThenElse"
   | .trace                => "trace"
+  | .unBData              => "unBData"
+  | .unListData           => "unListData"
 
 /-- `depth` = number of enclosing binders; `var i` names the binder
     introduced at depth `depth - 1 - i`. -/

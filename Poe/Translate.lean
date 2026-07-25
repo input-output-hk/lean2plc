@@ -1,6 +1,7 @@
 import Lean
 import Poe.Uplc
 import Poe.Prelude
+import Poe.PlutusData
 
 /-!
 # D1: LCNF → UPLC translator (stub)
@@ -94,7 +95,10 @@ def zFix (f : Uplc.Term) : Uplc.Term :=
     directly to a builtin applied to the (translated) LCNF args, in order.
     Grows with the fragment. -/
 def builtinTable : List (Name × Uplc.Builtin) :=
-  [(``Int.add, .addInteger), (``Int.decLt, .lessThanInteger), (``String.decEq, .equalsString)]
+  [ (``Int.add, .addInteger), (``Int.decLt, .lessThanInteger), (``String.decEq, .equalsString)
+  , (``ByteArray.instBEq.beq, .equalsByteString)
+  , (``Poe.PlutusData.unBData, .unBData)
+  ]
 
 def applyArgs (f : Uplc.Term) (args : List Uplc.Term) : Uplc.Term :=
   args.foldl .app f

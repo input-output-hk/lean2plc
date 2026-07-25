@@ -12,12 +12,20 @@ namespace Poe.Uplc
 instance : Repr ByteArray where
   reprPrec b n := reprPrec b.data n
 
+/-- Real Plutus Core `Data` has three more cases (`Constr`, `Map`, `I`) —
+    only the two `Poe.Examples.DataDecoding` needs (see `Poe.PlutusData`). -/
+inductive DataValue
+  | b    : ByteArray → DataValue
+  | list : List DataValue → DataValue
+deriving Repr, BEq
+
 inductive Const
   | integer    : Int → Const
   | bytestring : ByteArray → Const
   | string     : String → Const
   | bool       : Bool → Const
   | unit       : Const
+  | data       : DataValue → Const
 deriving Repr, BEq
 
 inductive Builtin
@@ -36,6 +44,8 @@ inductive Builtin
   | appendString
   | ifThenElse
   | trace
+  | unBData
+  | unListData
 deriving Repr, BEq
 
 /-- `Var i` is a de Bruijn index: 0 = innermost enclosing `lam`.
