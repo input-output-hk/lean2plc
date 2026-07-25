@@ -91,6 +91,41 @@ private def zCombinator : Uplc.Term :=
 def zFix (f : Uplc.Term) : Uplc.Term :=
   .app zCombinator f
 
+/-!
+## `decodeByteStringList`: a bespoke native-list-decode intrinsic
+
+`Poe.PlutusData.decodeByteStringList` is special-cased by name (in
+`translateConstCall`) to this hand-built loop instead of being translated
+from its Lean body — `unListData`'s own output is UPLC's *native* builtin
+list, which the ordinary `case` translation (built for our SoP `constr`
+encoding of Lean's `List`) can't walk (checked directly: `case` errors,
+"Attempted to apply a non-function"). Uses the same fixpoint combinator
+as ordinary recursive decls, walking the native list via
+`headList`/`tailList`/`nullList` (each needs exactly one `force` — a
+single-`forall` builtin, unlike the two-`forall` `ifThenElse`) and
+building an ordinary SoP `constr`-encoded `List ByteArray` as it goes, so
+everything downstream of this one primitive is back in the regular
+fragment. Verified standalone against `uplc` (both a non-empty and an
+empty native list) before wiring in.
+-/
+
+/-- Body of `λself. λlst. ...`, at depth 2 throughout (`self` = index 1,
+    `lst` = index 0 — `force`/`delay`/`constr` don't introduce binders). -/
+private def dataListLoopBody : Uplc.Term :=
+  let lst : Uplc.Term := .var 0
+  let self : Uplc.Term := .var 1
+  let cond := .app (.force (.builtin .nullList)) lst
+  let nilBranch := Uplc.Term.constr 0 []
+  let head := .app (.builtin .unBData) (.app (.force (.builtin .headList)) lst)
+  let tailRec := .app self (.app (.force (.builtin .tailList)) lst)
+  let consBranch := Uplc.Term.constr 1 [head, tailRec]
+  .force (.app (.app (.app (.force (.builtin .ifThenElse)) cond) (.delay nilBranch)) (.delay consBranch))
+
+/-- `λd. (fix loop) (unListData d)`. -/
+def decodeByteStringListTerm : Uplc.Term :=
+  .lam "d" (.app (zFix (.lam "self" (.lam "lst" dataListLoopBody)))
+                 (.app (.builtin .unListData) (.var 0)))
+
 /-- D1's builtin shim table (see PLAN.md): global names that translate
     directly to a builtin applied to the (translated) LCNF args, in order.
     Grows with the fragment. -/
@@ -164,6 +199,8 @@ partial def translateConstCall (ctx : Ctx) (declName : Name) (args : Array Arg) 
   -- dummy argument it was given to make it a real, non-inlinable
   -- `partial def` is irrelevant and ignored).
   | ``Poe.Prelude.abort, _ => return .error
+  | ``Poe.PlutusData.decodeByteStringList, #[a] =>
+    return .app decodeByteStringListTerm (← translateArg ctx a)
   | _, _ =>
     -- Constructor application (`List.cons`, ...): erased/type args are the
     -- inductive's own type parameters, not real fields, so they're dropped

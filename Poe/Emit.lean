@@ -61,6 +61,9 @@ def builtinName : Builtin → String
   | .trace                => "trace"
   | .unBData              => "unBData"
   | .unListData           => "unListData"
+  | .headList             => "headList"
+  | .tailList             => "tailList"
+  | .nullList             => "nullList"
 
 /-- `depth` = number of enclosing binders; `var i` names the binder
     introduced at depth `depth - 1 - i`. -/

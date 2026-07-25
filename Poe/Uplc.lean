@@ -46,6 +46,9 @@ inductive Builtin
   | trace
   | unBData
   | unListData
+  | headList
+  | tailList
+  | nullList
 deriving Repr, BEq
 
 /-- `Var i` is a de Bruijn index: 0 = innermost enclosing `lam`.
