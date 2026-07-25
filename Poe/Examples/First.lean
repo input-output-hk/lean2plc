@@ -1,15 +1,19 @@
 import Poe.Uplc
 import Poe.Emit
 import Poe.Translate
+import Poe.Oracle
 
 /-!
 # First light
 
-Two things only:
+Three things:
 1. A hand-built UPLC term + its emitted text — proves the emitter works
    before the translator exists (paste the output into `uplc evaluate`).
 2. The first fragment programs the translator will be pointed at, with the
    ordinary-Lean ghost layer they should eventually carry.
+3. D2: run each fragment program's translation through the real `uplc`
+   oracle on generated inputs, checked against the actual Lean function
+   (not a hand-copied expected value).
 -/
 
 namespace Poe.Examples
@@ -55,5 +59,24 @@ theorem double_nonneg (x : Int) (h : 0 ≤ x) : 0 ≤ double x := by
   IO.println (emit (← Poe.Translate.translate ``absInt))
 #eval show Lean.CoreM Unit from do
   IO.println (emit (← Poe.Translate.translate ``sumList))
+
+/-! D2: oracle harness, generated inputs, checked against the real `#eval`
+    value of each Lean function. -/
+
+/-- -5..5. -/
+def testInts : List Int := (List.range 11).map fun n => Int.ofNat n - 5
+
+def testLists : List (List Int) := [[], [1], [1, 2, 3], [-3, -2, -1, 0, 1, 2, 3], [5, 5, 5]]
+
+#eval show Lean.CoreM Unit from
+  Poe.Oracle.runSuite ``double (testInts.map fun x => ([Poe.Oracle.encodeInt x], double x))
+
+#eval show Lean.CoreM Unit from
+  Poe.Oracle.runSuite ``absInt (testInts.map fun x => ([Poe.Oracle.encodeInt x], absInt x))
+
+#eval show Lean.CoreM Unit from do
+  let cases ← testLists.mapM fun xs => do
+    return ([← Poe.Oracle.encodeIntList xs], sumList xs)
+  Poe.Oracle.runSuite ``sumList cases
 
 end Poe.Examples
