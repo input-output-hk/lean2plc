@@ -75,4 +75,32 @@ def runSuite (declName : Name) (cases : List (List Uplc.Term × Uplc.Const)) : C
       IO.println s!"FAIL: {msg}"
   IO.println s!"{declName}: {cases.length - failures}/{cases.length} passed"
 
+/-- Like `evalDecl`, but for a program expected to *abort* (a `check`-wrapped
+    validator on dishonest input): the CLI's own non-zero exit is the
+    success signal here, so this doesn't throw on it the way `evalDecl`
+    does. -/
+def evalDeclAllowingError (declName : Name) (args : List Uplc.Term) : CoreM (UInt32 × String) := do
+  let f ← Translate.translate declName
+  let out ← IO.Process.output { cmd := "uplc", args := #["evaluate"] } (some (emit (args.foldl .app f)))
+  return (out.exitCode, out.stdout.trim)
+
+def checkAborts (declName : Name) (args : List Uplc.Term) : CoreM (Except String Unit) := do
+  let (exitCode, actual) ← evalDeclAllowingError declName args
+  if exitCode != 0 then
+    return .ok ()
+  else
+    return .error s!"{declName} {args.map (emitTerm 0)}: expected to abort, oracle returned {actual}"
+
+/-- `runSuite`'s counterpart for cases that should abort (UPLC `error`),
+    e.g. a `check`-wrapped validator on dishonest input. -/
+def runSuiteAborts (declName : Name) (casesArgs : List (List Uplc.Term)) : CoreM Unit := do
+  let mut failures := 0
+  for args in casesArgs do
+    match ← checkAborts declName args with
+    | .ok () => pure ()
+    | .error msg =>
+      failures := failures + 1
+      IO.println s!"FAIL: {msg}"
+  IO.println s!"{declName}: {casesArgs.length - failures}/{casesArgs.length} aborted as expected"
+
 end Poe.Oracle

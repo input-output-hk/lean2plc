@@ -1,5 +1,6 @@
 import Lean
 import Poe.Uplc
+import Poe.Prelude
 
 /-!
 # D1: LCNF → UPLC translator (stub)
@@ -151,6 +152,14 @@ partial def translateConstCall (ctx : Ctx) (declName : Name) (args : Array Arg) 
   -- consumer would choke on a `constr` where it expects `(con bool _)`.
   | ``Bool.false, #[] => return .const (.bool false)
   | ``Bool.true, #[] => return .const (.bool true)
+  -- Same reasoning for `Unit`: the builtin unit constant, not a 0-field
+  -- SoP `constr`, so it matches real UPLC's own convention for it.
+  | ``PUnit.unit, #[] => return .const .unit
+  -- `Poe.Prelude.abort`'s Lean body is a placeholder never translated —
+  -- the name itself means UPLC's `error` term, full stop (whatever
+  -- dummy argument it was given to make it a real, non-inlinable
+  -- `partial def` is irrelevant and ignored).
+  | ``Poe.Prelude.abort, _ => return .error
   | _, _ =>
     -- Constructor application (`List.cons`, ...): erased/type args are the
     -- inductive's own type parameters, not real fields, so they're dropped

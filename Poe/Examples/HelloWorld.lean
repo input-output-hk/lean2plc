@@ -1,5 +1,6 @@
 import Poe.Lint
 import Poe.Oracle
+import Poe.Prelude
 
 /-!
 # D3: a real validator in plain Lean
@@ -23,6 +24,12 @@ def elem (x : String) : List String → Bool
     among the transaction's `signatories`. -/
 def validate (owner message : String) (signatories : List String) : Bool :=
   message == "Hello, World!" && elem owner signatories
+
+/-- The shape a real on-chain validator ends in: `check` turns the `Bool`
+    into success (`()`) or rejection (UPLC `error`), since that's how a
+    validator actually signals failure — not by returning `false`. -/
+def validateChecked (owner message : String) (signatories : List String) : Unit :=
+  Poe.Prelude.check (validate owner message signatories)
 
 /-! ## (a) Ordinary Lean correctness theorems about the source function -/
 
@@ -56,6 +63,7 @@ theorem validate_correct_false (owner message : String) (signatories : List Stri
 
 #eval Poe.Lint.check ``elem
 #eval Poe.Lint.check ``validate
+#eval Poe.Lint.check ``validateChecked
 
 /- Honest input: right message, owner signed. Dishonest: wrong message;
    right message but owner didn't sign. All checked against the real
@@ -72,5 +80,20 @@ theorem validate_correct_false (owner message : String) (signatories : List Stri
                  ← Poe.Oracle.encodeStringList signatories]
     return (args, Poe.Uplc.Const.bool (validate owner message signatories))
   Poe.Oracle.runSuite ``validate cases
+
+/- Same inputs through `validateChecked`: honest succeeds (evaluates to
+   `()`), dishonest aborts (evaluates to UPLC `error`) — the actual
+   on-chain accept/reject signal, not a returned `Bool`. -/
+#eval show Lean.CoreM Unit from do
+  let signers := ["bob", "alice", "carol"]
+  let argsFor (owner message : String) (signatories : List String) : Lean.CoreM (List Poe.Uplc.Term) := do
+    return [Poe.Oracle.encodeString owner, Poe.Oracle.encodeString message,
+            ← Poe.Oracle.encodeStringList signatories]
+  Poe.Oracle.runSuite ``validateChecked
+    [(← argsFor "alice" "Hello, World!" signers, .unit)]
+  Poe.Oracle.runSuiteAborts ``validateChecked
+    [ ← argsFor "alice" "wrong message" signers
+    , ← argsFor "mallory" "Hello, World!" []
+    ]
 
 end Poe.Examples.HelloWorld
