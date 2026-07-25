@@ -1,0 +1,105 @@
+import Poe.Lint
+import Poe.Oracle
+import Poe.Prelude
+
+/-!
+# D3: a real validator in plain Lean
+
+Hello-world-grade: redeemer (message) check + signature membership over a
+list — the same shape as Aiken's own `hello_world` template (message
+check + datum-owner-signed check). `elem` is written as a plain recursive
+function rather than via `List.elem`/`∈` so the translator sees an
+ordinary named self-call, not a typeclass method (monomorphization
+removing typeclasses is assumed, not itself exercised, per PLAN.md's
+non-goals).
+
+Uses `String`/`List String` directly rather than real on-chain `Data` —
+`Poe.Examples.HelloWorld` is the same validator shape against a real
+single-`Data`-argument `ScriptContext`. Kept around as the simpler
+incremental-testing version: if a future regression breaks something,
+this file isolates whether the fault is in the core translation (still
+exercised here) or specifically in `Data`/`ScriptContext` navigation. -/
+
+namespace Poe.Examples.HelloWorldString
+
+def elem (x : String) : List String → Bool
+  | []      => false
+  | y :: ys => x == y || elem x ys
+
+/-- Redeemer message must be exactly right, and the datum's `owner` must be
+    among the transaction's `signatories`. -/
+def validate (owner message : String) (signatories : List String) : Bool :=
+  message == "Hello, World!" && elem owner signatories
+
+/-- The shape a real on-chain validator ends in: `check` turns the `Bool`
+    into success (`()`) or rejection (UPLC `error`), since that's how a
+    validator actually signals failure — not by returning `false`. -/
+def validateChecked (owner message : String) (signatories : List String) : Unit :=
+  Poe.Prelude.check (validate owner message signatories)
+
+/-! ## (a) Ordinary Lean correctness theorems about the source function -/
+
+theorem elem_iff (x : String) : ∀ ys, elem x ys = true ↔ x ∈ ys
+  | [] => by simp [elem]
+  | y :: ys => by simp [elem, elem_iff x ys]
+
+theorem validate_correct (owner message : String) (signatories : List String) :
+    validate owner message signatories = true ↔
+      message = "Hello, World!" ∧ owner ∈ signatories := by
+  simp [validate, elem_iff]
+
+/-- The rejection case: a direct corollary of `validate_correct` (`Bool` has
+    only two values, so the `false` case is the negation of the `true`
+    case), not a fact requiring separate reasoning about `validate`. -/
+theorem validate_correct_false (owner message : String) (signatories : List String) :
+    validate owner message signatories = false ↔
+      message ≠ "Hello, World!" ∨ owner ∉ signatories := by
+  rw [← Bool.not_eq_true, validate_correct]
+  constructor
+  · intro h
+    by_cases hm : message = "Hello, World!"
+    · exact Or.inr fun hs => h ⟨hm, hs⟩
+    · exact Or.inl hm
+  · intro h hp
+    cases h with
+    | inl h => exact h hp.1
+    | inr h => exact h hp.2
+
+/-! ## (b) Fragment-checked, emitted, and run through the oracle -/
+
+#eval Poe.Lint.check ``elem
+#eval Poe.Lint.check ``validate
+#eval Poe.Lint.check ``validateChecked
+
+/- Honest input: right message, owner signed. Dishonest: wrong message;
+   right message but owner didn't sign. All checked against the real
+   oracle, not just against Lean's own evaluator. -/
+#eval show Lean.CoreM Unit from do
+  let signers := ["bob", "alice", "carol"]
+  let inputs : List (String × String × List String) :=
+    [ ("alice", "Hello, World!", signers)    -- honest
+    , ("alice", "wrong message", signers)    -- dishonest: bad message
+    , ("mallory", "Hello, World!", [])       -- dishonest: owner didn't sign
+    ]
+  let cases ← inputs.mapM fun (owner, message, signatories) => do
+    let args := [Poe.Oracle.encodeString owner, Poe.Oracle.encodeString message,
+                 ← Poe.Oracle.encodeStringList signatories]
+    return (args, Poe.Uplc.Const.bool (validate owner message signatories))
+  Poe.Oracle.runSuite ``validate cases
+
+/- Same inputs through `validateChecked`: honest succeeds (evaluates to
+   `()`), dishonest aborts (evaluates to UPLC `error`) — the actual
+   on-chain accept/reject signal, not a returned `Bool`. -/
+#eval show Lean.CoreM Unit from do
+  let signers := ["bob", "alice", "carol"]
+  let argsFor (owner message : String) (signatories : List String) : Lean.CoreM (List Poe.Uplc.Term) := do
+    return [Poe.Oracle.encodeString owner, Poe.Oracle.encodeString message,
+            ← Poe.Oracle.encodeStringList signatories]
+  Poe.Oracle.runSuite ``validateChecked
+    [(← argsFor "alice" "Hello, World!" signers, .unit)]
+  Poe.Oracle.runSuiteAborts ``validateChecked
+    [ ← argsFor "alice" "wrong message" signers
+    , ← argsFor "mallory" "Hello, World!" []
+    ]
+
+end Poe.Examples.HelloWorldString

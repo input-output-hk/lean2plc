@@ -192,6 +192,19 @@ def translateArg (ctx : Ctx) : Arg → CoreM Uplc.Term
   | .erased | .type _ =>
     throwError "translator: erased/type argument reached D1 (out of fragment)"
 
+/-- Ghost (`Prop`-typed, hence `lcErased`) arguments — e.g. a `y ≠ 0` proof
+    handed to a partial builtin like division — carry no runtime content
+    and are dropped before translation, not passed through `translateArg`
+    (which still rejects a genuinely-untranslatable erased/type argument
+    reaching it any other way). Without this, calling such a function
+    failed outright ("erased/type argument reached D1"), confirmed
+    directly: `f x y (proof : y ≠ 0)` dumps to mono LCNF as `f x y ◾`, the
+    `◾` being exactly the `Arg.erased` case this filters out. Must match
+    `translateDecl`'s equally-necessary filtering of erased *parameters*
+    on the callee side, or arities disagree. -/
+def translateArgs (ctx : Ctx) (args : Array Arg) : CoreM (List Uplc.Term) :=
+  (args.toList.filter fun | .fvar _ => true | .erased | .type _ => false).mapM (translateArg ctx)
+
 /-- The constructors of an inductive type, in declaration order — which is
     also the `constr`/`case` index convention this translator uses both for
     building `case` branches here and for encoding sample inputs in tests. -/
@@ -228,7 +241,7 @@ mutual
 partial def translateConstCall (ctx : Ctx) (declName : Name) (args : Array Arg) : CoreM Uplc.Term := do
   if let some (selfName, selfDepth) := ctx.self then
     if declName == selfName then
-      return applyArgs (.var (ctx.depth - 1 - selfDepth)) (← args.toList.mapM (translateArg ctx))
+      return applyArgs (.var (ctx.depth - 1 - selfDepth)) (← translateArgs ctx args)
   match declName, args with
   | ``Int.ofNat, #[a] => translateArg ctx a
   | ``Int.neg, #[a] =>
@@ -264,10 +277,10 @@ partial def translateConstCall (ctx : Ctx) (declName : Name) (args : Array Arg) 
       Uplc.Term.constr info.cidx <$> fieldArgs.mapM fun fvarId => return .var (← ctx.lookup fvarId)
     else
       match builtinTable.lookup declName with
-      | some b => applyArgs (.builtin b) <$> args.toList.mapM (translateArg ctx)
+      | some b => applyArgs (.builtin b) <$> translateArgs ctx args
       | none => do
         let callee ← translate declName
-        applyArgs callee <$> args.toList.mapM (translateArg ctx)
+        applyArgs callee <$> translateArgs ctx args
 
 /-- Other `LetValue` shapes (projections) aren't needed by the examples so
     far. -/
@@ -309,8 +322,13 @@ partial def translateCode (ctx : Ctx) : Code → CoreM Uplc.Term
       return .force (.app (.app (.app (.force (.builtin .ifThenElse)) discr) (.delay thenBranch)) (.delay elseBranch))
     else
       let branches ← (← ctorNames cases.typeName).toList.mapM fun ctorName => do
-        let some (.alt _ params code) := cases.alts.find? (fun | .alt n .. => n == ctorName | .default _ => false)
+        let some (.alt _ allParams code) := cases.alts.find? (fun | .alt n .. => n == ctorName | .default _ => false)
           | throwError "translator: cases on {cases.typeName} missing an alternative for {ctorName} (default alts not yet handled)"
+        -- Same ghost-field dropping as `translateConstCall`'s constructor
+        -- case (which already only binds `.fvar` fields into a built
+        -- `constr`): a branch here must bind exactly the fields that value
+        -- was actually built with, or the arities disagree.
+        let params := allParams.filter fun p => !p.type.isErased
         let branchBody ← translateCode (params.foldl (init := ctx) (·.bind ·.fvarId)) code
         return params.foldr (init := branchBody) fun p acc => .lam p.binderName.toString acc
       return .case discr branches
@@ -320,10 +338,17 @@ partial def translateDecl (decl : Decl) : CoreM Uplc.Term := do
   let .code code := decl.value
     | throwError "translator: extern declarations are not in the fragment"
   let recursive := codeMentionsSelf decl.name code
+  -- Ghost (`lcErased`-typed) params — e.g. a `y ≠ 0` proof — get no lambda
+  -- binder at all, matching `translateArgs` dropping the corresponding
+  -- argument at every call site (confirmed directly: without this, a
+  -- declaration like `f (x y : Int) (_h : y ≠ 0) : Int` compiled with an
+  -- extra, permanently-unused third lambda parameter every caller would
+  -- then have to know to apply to *something*).
+  let params := decl.params.filter fun p => !p.type.isErased
   let ctx0 : Ctx := if recursive then { depth := 1, self := some (decl.name, 0) } else {}
-  let ctx := decl.params.foldl (init := ctx0) (·.bind ·.fvarId)
+  let ctx := params.foldl (init := ctx0) (·.bind ·.fvarId)
   let body ← translateCode ctx code
-  let paramsBody := decl.params.foldr (init := body) fun p acc => .lam p.binderName.toString acc
+  let paramsBody := params.foldr (init := body) fun p acc => .lam p.binderName.toString acc
   return if recursive then zFix (.lam "self" paramsBody) else paramsBody
 
 partial def translate (declName : Name) : CoreM Uplc.Term := do

@@ -9,7 +9,7 @@ import Poe.Examples.DataDecoding
 
 The Aiken `hello_world` template's shape (redeemer message check +
 datum-owner-signed check), real `Data` throughout rather than
-`Poe.Examples.HelloWorld`'s `String` stand-ins. Reuses
+`Poe.Examples.HelloWorldString`'s `String` stand-ins. Reuses
 `elemBytes`/`encodeBytes`/`encodeByteList` from
 `Poe.Examples.DataDecoding`, where `unBData`/`decodeByteStringList` were
 built up and tested in isolation.

@@ -29,6 +29,26 @@ def elemBytes (x : ByteArray) : List ByteArray → Bool
   | []      => false
   | y :: ys => x == y || elemBytes x ys
 
+/-- `ByteArray` has no `LawfulBEq` instance in this toolchain (checked
+    directly — `inferInstance : LawfulBEq ByteArray` fails to synthesize),
+    unlike `String`, so `elemBytes_iff` below can't just `simp` through
+    `==` the way `Poe.Examples.HelloWorldString.elem_iff` does; bridging
+    through the underlying `Array UInt8`'s own (real) `LawfulBEq` instance
+    first. -/
+theorem ByteArray.beq_iff_eq (x y : ByteArray) : (x == y) = true ↔ x = y := by
+  obtain ⟨a⟩ := x
+  obtain ⟨b⟩ := y
+  show (a.isEqv b fun u v => decide (u = v)) = true ↔ ByteArray.mk a = ByteArray.mk b
+  rw [show (a.isEqv b fun u v => decide (u = v)) = (a == b) from rfl, _root_.beq_iff_eq]
+  simp
+
+/-- Same shape as `Poe.Examples.HelloWorldString.elem_iff` — used by
+    `Poe.Examples.HelloWorld`'s correctness proof, since that validator's
+    signer check bottoms out in this function instead. -/
+theorem elemBytes_iff (x : ByteArray) : ∀ ys, elemBytes x ys = true ↔ x ∈ ys
+  | [] => by simp [elemBytes]
+  | y :: ys => by simp [elemBytes, elemBytes_iff x ys, ByteArray.beq_iff_eq]
+
 /-- Does the `Data`-encoded `owner` appear in the `Data`-encoded
     `signatories`? -/
 def validateSignerData (owner signatories : Data) : Unit :=
