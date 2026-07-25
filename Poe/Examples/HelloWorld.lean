@@ -35,6 +35,23 @@ theorem validate_correct (owner message : String) (signatories : List String) :
       message = "Hello, World!" ∧ owner ∈ signatories := by
   simp [validate, elem_iff]
 
+/-- The rejection case: a direct corollary of `validate_correct` (`Bool` has
+    only two values, so the `false` case is the negation of the `true`
+    case), not a fact requiring separate reasoning about `validate`. -/
+theorem validate_correct_false (owner message : String) (signatories : List String) :
+    validate owner message signatories = false ↔
+      message ≠ "Hello, World!" ∨ owner ∉ signatories := by
+  rw [← Bool.not_eq_true, validate_correct]
+  constructor
+  · intro h
+    by_cases hm : message = "Hello, World!"
+    · exact Or.inr fun hs => h ⟨hm, hs⟩
+    · exact Or.inl hm
+  · intro h hp
+    cases h with
+    | inl h => exact h hp.1
+    | inr h => exact h hp.2
+
 /-! ## (b) Fragment-checked, emitted, and run through the oracle -/
 
 #eval Poe.Lint.check ``elem
