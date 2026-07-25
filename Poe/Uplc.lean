@@ -12,11 +12,15 @@ namespace Poe.Uplc
 instance : Repr ByteArray where
   reprPrec b n := reprPrec b.data n
 
-/-- Real Plutus Core `Data` has three more cases (`Constr`, `Map`, `I`) —
-    only the two `Poe.Examples.DataDecoding` needs (see `Poe.PlutusData`). -/
+/-- Real Plutus Core `Data` has one more case (`Map`) — not needed by any
+    Poe example (see `Poe.PlutusData`). `constr`'s `Nat` is the constructor
+    tag (e.g. `ScriptContext`/`TxInfo` are always tag 0 — single-constructor
+    records; `Maybe`'s `Just`/`Nothing` are tags 0/1 respectively — both
+    verified against `plutus-ledger-api` source, not assumed). -/
 inductive DataValue
-  | b    : ByteArray → DataValue
-  | list : List DataValue → DataValue
+  | b      : ByteArray → DataValue
+  | list   : List DataValue → DataValue
+  | constr : Nat → List DataValue → DataValue
 deriving Repr, BEq
 
 inductive Const
@@ -50,6 +54,9 @@ inductive Builtin
   | tailList
   | nullList
   | encodeUtf8
+  | unConstrData
+  | fstPair
+  | sndPair
 deriving Repr, BEq
 
 /-- `Var i` is a de Bruijn index: 0 = innermost enclosing `lam`.

@@ -75,4 +75,28 @@ opaque unBData (_ : Data) : ByteArray := ByteArray.mk #[]
     needed one. -/
 partial def decodeByteStringList (d : Data) : List ByteArray := decodeByteStringList d
 
+/-!
+## Generic `Data`-record accessors
+
+Real records (`ScriptContext`, `TxInfo`, a user's own `Datum`/`Redeemer`)
+are all just `Constr tag [field0, field1, ...]` at the `Data` level —
+verified against `plutus-ledger-api` (`makeIsDataSchemaIndexed` always
+tags single-constructor records 0; `Maybe`'s `Just`/`Nothing` are
+specifically 0/1, the opposite of the "obvious" guess). These accessors
+are purely positional, so the same `field0` works on any of them; `field8`
+exists only because `TxInfo.txInfoSignatories` sits at index 8 of the
+real 16-field record. `Translate` special-cases all five names directly
+to `unConstrData`/`fstPair`/`sndPair`/`headList`/`tailList` chains
+(verified standalone against `uplc` first, including a nested `Constr`).
+
+All return `Data`, a single-constructor type — same "the compiler can
+still find a knowable constructor" risk `decodeByteStringList` hit, so
+all five need the same self-recursive treatment, not `opaque`. -/
+
+partial def constrTag (d : Data) : Int := constrTag d
+partial def field0 (d : Data) : Data := field0 d
+partial def field1 (d : Data) : Data := field1 d
+partial def field2 (d : Data) : Data := field2 d
+partial def field8 (d : Data) : Data := field8 d
+
 end Poe.PlutusData

@@ -10,3 +10,4 @@ import Poe.Examples.OutOfFragment
 import Poe.Examples.HelloWorld
 import Poe.Examples.DataDecoding
 import Poe.Examples.AikenHelloWorld
+import Poe.Examples.ScriptContext

@@ -25,12 +25,13 @@ def toHex (b : ByteArray) : String :=
     s.push (hexDigit (byte / 16)) |>.push (hexDigit (byte % 16))
 
 /-- Matches `uplc`'s own concrete syntax for `Data` literals exactly,
-    verified directly (e.g. `(con data (List [B #61, B #62]))`) — real
-    `Data` also has `Constr`/`Map`/`I`, not modeled here (see
-    `Poe.PlutusData`). -/
+    verified directly (e.g. `(con data (List [B #61, B #62]))`,
+    `(con data (Constr 0 [Constr 1 [B #61], I 2]))`) — real `Data` also has
+    `Map`, not modeled here (see `Poe.PlutusData`). -/
 partial def emitDataValue : DataValue → String
   | .b bytes => s!"B #{toHex bytes}"
   | .list xs => s!"List [{String.intercalate ", " (xs.map emitDataValue)}]"
+  | .constr tag xs => s!"Constr {tag} [{String.intercalate ", " (xs.map emitDataValue)}]"
 
 def emitConst : Const → String
   | .integer i    => s!"(con integer {i})"
@@ -65,6 +66,9 @@ def builtinName : Builtin → String
   | .tailList             => "tailList"
   | .nullList             => "nullList"
   | .encodeUtf8           => "encodeUtf8"
+  | .unConstrData         => "unConstrData"
+  | .fstPair              => "fstPair"
+  | .sndPair              => "sndPair"
 
 /-- `depth` = number of enclosing binders; `var i` names the binder
     introduced at depth `depth - 1 - i`. -/

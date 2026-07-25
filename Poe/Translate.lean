@@ -126,12 +126,45 @@ def decodeByteStringListTerm : Uplc.Term :=
   .lam "d" (.app (zFix (.lam "self" (.lam "lst" dataListLoopBody)))
                  (.app (.builtin .unListData) (.var 0)))
 
+/-!
+## Generic `Data`-record accessors: `constrTag`/`field0`/`field1`/`field2`/`field8`
+
+Real records like `ScriptContext`/`TxInfo` are just `Constr tag [field0,
+field1, ...]` (verified against `plutus-ledger-api` source:
+`makeIsDataSchemaIndexed` always assigns single-constructor records tag 0,
+sum-type variants their declared index — e.g. `Maybe`'s `Just`/`Nothing`
+are 0/1). These accessors are purely *positional* — the same `field0`
+works on `ScriptContext` (→ `TxInfo`), `ScriptInfo`'s `SpendingScript`
+payload (→ its `TxOutRef`), `Maybe`'s `Just` payload, or a user's own
+single-field `Datum` record — since `unConstrData`+`sndPair` gives back
+the field list regardless of what the record "means". `field8` exists
+only because `TxInfo.txInfoSignatories` happens to sit at index 8 in the
+real 16-field record. Same reasoning as `decodeByteStringList`: the field
+list is UPLC's *native* list, not our SoP encoding, so this is a bespoke
+intrinsic, not something a generic `cases` translation could produce. -/
+
+/-- `unConstrData blob`'s fields, as UPLC's native `list(data)` (not our
+    SoP `List`). -/
+private def fieldsOfTerm (blob : Uplc.Term) : Uplc.Term :=
+  .app (.force (.force (.builtin .sndPair))) (.app (.builtin .unConstrData) blob)
+
+private def applyTailListN : Nat → Uplc.Term → Uplc.Term
+  | 0, t => t
+  | n + 1, t => applyTailListN n (.app (.force (.builtin .tailList)) t)
+
+private def fieldAtTerm (n : Nat) (blob : Uplc.Term) : Uplc.Term :=
+  .app (.force (.builtin .headList)) (applyTailListN n (fieldsOfTerm blob))
+
+private def constrTagTerm (blob : Uplc.Term) : Uplc.Term :=
+  .app (.force (.force (.builtin .fstPair))) (.app (.builtin .unConstrData) blob)
+
 /-- D1's builtin shim table (see PLAN.md): global names that translate
     directly to a builtin applied to the (translated) LCNF args, in order.
     Grows with the fragment. -/
 def builtinTable : List (Name × Uplc.Builtin) :=
   [ (``Int.add, .addInteger), (``Int.decLt, .lessThanInteger), (``String.decEq, .equalsString)
   , (``ByteArray.instBEq.beq, .equalsByteString), (``String.toUTF8, .encodeUtf8)
+  , (``Int.decEq, .equalsInteger)
   , (``Poe.PlutusData.unBData, .unBData)
   ]
 
@@ -201,6 +234,11 @@ partial def translateConstCall (ctx : Ctx) (declName : Name) (args : Array Arg) 
   | ``Poe.Prelude.abort, _ => return .error
   | ``Poe.PlutusData.decodeByteStringList, #[a] =>
     return .app decodeByteStringListTerm (← translateArg ctx a)
+  | ``Poe.PlutusData.constrTag, #[a] => return constrTagTerm (← translateArg ctx a)
+  | ``Poe.PlutusData.field0, #[a] => return fieldAtTerm 0 (← translateArg ctx a)
+  | ``Poe.PlutusData.field1, #[a] => return fieldAtTerm 1 (← translateArg ctx a)
+  | ``Poe.PlutusData.field2, #[a] => return fieldAtTerm 2 (← translateArg ctx a)
+  | ``Poe.PlutusData.field8, #[a] => return fieldAtTerm 8 (← translateArg ctx a)
   | _, _ =>
     -- Constructor application (`List.cons`, ...): erased/type args are the
     -- inductive's own type parameters, not real fields, so they're dropped
