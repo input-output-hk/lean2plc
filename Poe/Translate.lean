@@ -55,10 +55,11 @@ def Ctx.lookup (ctx : Ctx) (fvarId : FVarId) : CoreM Nat := do
     | throwError "translator: unbound variable {Expr.fvar fvarId}"
   return ctx.depth - 1 - bindingDepth
 
-/-- D1's builtin shim table (see PLAN.md). Grows with the fragment; for now
-    only what `double` needs. -/
+/-- D1's builtin shim table (see PLAN.md): global names that translate
+    directly to a builtin applied to the (translated) LCNF args, in order.
+    Grows with the fragment. -/
 def builtinTable : List (Name × Uplc.Builtin) :=
-  [(``Int.add, .addInteger)]
+  [(``Int.add, .addInteger), (``Int.decLt, .lessThanInteger)]
 
 def applyArgs (f : Uplc.Term) (args : List Uplc.Term) : Uplc.Term :=
   args.foldl .app f
@@ -68,27 +69,53 @@ def translateArg (ctx : Ctx) : Arg → CoreM Uplc.Term
   | .erased | .type _ =>
     throwError "translator: erased/type argument reached D1 (out of fragment)"
 
-/-- Calls to a known global (`LetValue.const`) go through the builtin shim
-    table. Other `LetValue` shapes (literals, projections, local/self
-    application) aren't needed for `double` yet. -/
-def translateLetValue (ctx : Ctx) : LetValue → CoreM Uplc.Term
-  | .const declName _us args => do
+/-- Calls that don't fit the flat builtin-table shape: `Int.ofNat` is the
+    identity at the value level (Nat/Int share the UPLC integer constant),
+    and `Int.neg` has no builtin of its own (synthesized as `0 - x`). -/
+def translateConstCall (ctx : Ctx) (declName : Name) (args : Array Arg) : CoreM Uplc.Term := do
+  match declName, args with
+  | ``Int.ofNat, #[a] => translateArg ctx a
+  | ``Int.neg, #[a] =>
+    return .app (.app (.builtin .subtractInteger) (.const (.integer 0))) (← translateArg ctx a)
+  | _, _ =>
     let some b := builtinTable.lookup declName
       | throwError "translator: no builtin shim for {declName} (out of fragment for D1)"
     applyArgs (.builtin b) <$> args.toList.mapM (translateArg ctx)
+
+/-- Other `LetValue` shapes (projections, local/self application) aren't
+    needed until `sumList`. -/
+def translateLetValue (ctx : Ctx) : LetValue → CoreM Uplc.Term
+  | .const declName _us args => translateConstCall ctx declName args
+  | .lit (.nat n) => return .const (.integer (Int.ofNat n))
+  | .lit .. => throwError "translator: only Nat literals are handled so far"
   | .fvar .. => throwError "translator: local/self application not yet handled"
-  | .lit .. => throwError "translator: literals not yet handled"
   | .proj .. => throwError "translator: projections not yet handled"
   | .erased => throwError "translator: erased let-value reached D1 (out of fragment)"
 
-/-- Only the two `Code` shapes `double` produces: a chain of `let`s ending in
-    `return`. `let x := v; k` becomes the beta-redex `[(lam x k) v]`. -/
+/-- `let`/`return`, and `cases` on `Bool` (open question 3 in PLAN.md: cased
+    on the *builtin* bool via `ifThenElse`, not an SoP `constr`/`case` pair —
+    matches the census idiom of forced-builtin bindings). `cases` on any
+    other inductive isn't needed until `sumList`. -/
 partial def translateCode (ctx : Ctx) : Code → CoreM Uplc.Term
   | .let decl k => do
     let v ← translateLetValue ctx decl.value
     let body ← translateCode (ctx.bind decl.fvarId) k
     return .app (.lam decl.binderName.toString body) v
   | .return fvarId => return .var (← ctx.lookup fvarId)
+  | .cases cases => do
+    unless cases.typeName == ``Bool do
+      throwError "translator: cases on {cases.typeName} not yet handled (only Bool so far)"
+    let some trueAlt := cases.alts.find? (fun | .alt n .. => n == ``Bool.true | .default _ => false)
+      | throwError "translator: Bool cases missing a Bool.true alternative"
+    let some falseAlt := cases.alts.find? (fun | .alt n .. => n == ``Bool.false | .default _ => false)
+      | throwError "translator: Bool cases missing a Bool.false alternative"
+    let discr := Uplc.Term.var (← ctx.lookup cases.discr)
+    let thenBranch ← translateCode ctx trueAlt.getCode
+    let elseBranch ← translateCode ctx falseAlt.getCode
+    -- `ifThenElse` is polymorphic even in UPLC: one `force` to strip that
+    -- before applying the (strict) value args, one more to force whichever
+    -- delayed branch it returns.
+    return .force (.app (.app (.app (.force (.builtin .ifThenElse)) discr) (.delay thenBranch)) (.delay elseBranch))
   | _ => throwError "translator: unsupported Code constructor (not yet handled)"
 
 def translateDecl (decl : Decl) : CoreM Uplc.Term := do
