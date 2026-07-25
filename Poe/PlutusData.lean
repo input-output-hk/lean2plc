@@ -35,18 +35,18 @@ single-constructor) `inductive` avoids that entirely.
 `unListData` alone doesn't work the way `unBData` does, though: checked
 directly against `uplc` and found it returns UPLC's *native* builtin list
 (`(con (list data) ...)`), not our SoP `constr`/`case` encoding of Lean's
-`List` — `case` errors ("Attempted to apply a non-function") trying to
-scrutinize it. `List`-typed LCNF looks structurally identical regardless
-of which representation the *values* flowing through it actually use, so
-the translator can't tell "this `List Data`-shaped `cases` should walk a
+`List`. `List`-typed LCNF looks structurally identical regardless of which
+representation the *values* flowing through it actually use, so the
+translator can't tell "this `List Data`-shaped `cases` should walk a
 native list" from "this is an ordinary Lean `List`" generically. Rather
 than build that (real, separate work), `decodeByteStringList` is a single
 bespoke intrinsic, special-cased by name exactly like `abort`: `Translate`
-recognizes this exact declaration and emits a hand-built loop over
-`headList`/`tailList`/`nullList` (verified standalone against `uplc`
-first) that builds an ordinary SoP `List ByteArray` as it goes, so
-everything *downstream* of this one primitive is back in the regular
-fragment. -/
+recognizes this exact declaration and emits a hand-built loop using
+UPLC's `case` directly on the native list (verified standalone against
+`uplc`: a native-list scrutinee takes a 2-argument cons lambda first, a
+0-argument nil term second — no `headList`/`tailList`/`nullList` needed)
+that builds an ordinary SoP `List ByteArray` as it goes, so everything
+*downstream* of this one primitive is back in the regular fragment. -/
 
 namespace Poe.PlutusData
 
@@ -88,6 +88,13 @@ exists only because `TxInfo.txInfoSignatories` sits at index 8 of the
 real 16-field record. `Translate` special-cases all five names directly
 to `unConstrData`/`fstPair`/`sndPair`/`headList`/`tailList` chains
 (verified standalone against `uplc` first, including a nested `Constr`).
+A `case`-based version (mirroring `decodeByteStringList`'s loop) was
+tried too, but measured *larger* for these: unlike that loop, which
+reuses one body via the fixpoint combinator, these accessors unroll a
+fresh `case` per field index walked, and each one's extra `(lam h (lam t
+...)) (error)` wrapper costs more than the plain builtin chain it would
+replace — see `Poe.Translate`'s doc comment on `fieldAtTerm` for the
+measurement.
 
 All return `Data`, a single-constructor type — same "the compiler can
 still find a knowable constructor" risk `decodeByteStringList` hit, so

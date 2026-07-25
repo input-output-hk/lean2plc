@@ -98,28 +98,32 @@ def zFix (f : Uplc.Term) : Uplc.Term :=
 `translateConstCall`) to this hand-built loop instead of being translated
 from its Lean body — `unListData`'s own output is UPLC's *native* builtin
 list, which the ordinary `case` translation (built for our SoP `constr`
-encoding of Lean's `List`) can't walk (checked directly: `case` errors,
-"Attempted to apply a non-function"). Uses the same fixpoint combinator
-as ordinary recursive decls, walking the native list via
-`headList`/`tailList`/`nullList` (each needs exactly one `force` — a
-single-`forall` builtin, unlike the two-`forall` `ifThenElse`) and
-building an ordinary SoP `constr`-encoded `List ByteArray` as it goes, so
+encoding of Lean's `List`) targets a *different* representation. But
+`case` itself works directly on a native list too, given the right
+branch shape — verified directly against `uplc`: a scrutinee that's a
+native list takes exactly two alternatives, a 2-argument lambda
+(head/tail) for the cons case *first*, then a bare 0-argument term for
+nil *second* (the opposite order from our own SoP convention, and no
+`headList`/`tailList`/`nullList`/`ifThenElse` needed at all — found by
+comparing Plinth's real compiled output against ours, where Plinth's
+version was substantially smaller for exactly this reason). Uses the same
+fixpoint combinator as ordinary recursive decls to walk the list, building
+an ordinary SoP `constr`-encoded `List ByteArray` as it goes, so
 everything downstream of this one primitive is back in the regular
-fragment. Verified standalone against `uplc` (both a non-empty and an
-empty native list) before wiring in.
+fragment.
 -/
 
-/-- Body of `λself. λlst. ...`, at depth 2 throughout (`self` = index 1,
-    `lst` = index 0 — `force`/`delay`/`constr` don't introduce binders). -/
+/-- Body of `λself. λlst. case lst consBranch nilBranch`, `self`/`lst` at
+    depth 2 (`self` = index 1, `lst` = index 0). Inside the cons branch
+    (`λh. λt. ...`), two more binders are in scope, shifting everything
+    already-bound by 2: `h` = index 1, `t` = index 0, and the outer `self`
+    is now index 1 + 2 = 3. -/
 private def dataListLoopBody : Uplc.Term :=
   let lst : Uplc.Term := .var 0
-  let self : Uplc.Term := .var 1
-  let cond := .app (.force (.builtin .nullList)) lst
+  let consBranch :=
+    .lam "h" (.lam "t" (Uplc.Term.constr 1 [.app (.builtin .unBData) (.var 1), .app (.var 3) (.var 0)]))
   let nilBranch := Uplc.Term.constr 0 []
-  let head := .app (.builtin .unBData) (.app (.force (.builtin .headList)) lst)
-  let tailRec := .app self (.app (.force (.builtin .tailList)) lst)
-  let consBranch := Uplc.Term.constr 1 [head, tailRec]
-  .force (.app (.app (.app (.force (.builtin .ifThenElse)) cond) (.delay nilBranch)) (.delay consBranch))
+  .case lst [consBranch, nilBranch]
 
 /-- `λd. (fix loop) (unListData d)`. -/
 def decodeByteStringListTerm : Uplc.Term :=
@@ -136,15 +140,27 @@ sum-type variants their declared index — e.g. `Maybe`'s `Just`/`Nothing`
 are 0/1). These accessors are purely *positional* — the same `field0`
 works on `ScriptContext` (→ `TxInfo`), `ScriptInfo`'s `SpendingScript`
 payload (→ its `TxOutRef`), `Maybe`'s `Just` payload, or a user's own
-single-field `Datum` record — since `unConstrData`+`sndPair` gives back
-the field list regardless of what the record "means". `field8` exists
-only because `TxInfo.txInfoSignatories` happens to sit at index 8 in the
-real 16-field record. Same reasoning as `decodeByteStringList`: the field
-list is UPLC's *native* list, not our SoP encoding, so this is a bespoke
-intrinsic, not something a generic `cases` translation could produce. -/
+single-field `Datum` record — since `unConstrData` gives back the field
+list regardless of what the record "means". `field8` exists only because
+`TxInfo.txInfoSignatories` happens to sit at index 8 in the real 16-field
+record.
 
-/-- `unConstrData blob`'s fields, as UPLC's native `list(data)` (not our
-    SoP `List`). -/
+`case` on a builtin *pair* works the same way as on a list — no `fstPair`/
+`sndPair` needed, just one alternative, a 2-argument lambda destructuring
+both components directly — and this did get tried here too. But unlike
+`decodeByteStringList` (a single loop body, reused via the fixpoint
+combinator regardless of the list's length), these accessors *unroll* a
+fixed number of `case`s at translation time, one per field index walked.
+Measured directly (compiled size of `validateScriptContext`, whose deepest
+accessor is `field8`): the naive all-`case` version came to 384 bytes,
+*larger* than the original 364 — each unrolled level pays for a fresh
+`(lam h (lam t ...)) (error)` wrapper, which costs more than the single
+builtin application `tailList` chains this replaced. So the pair/list
+`case` trick is a real win only for genuinely-recursive loops; these
+purely-positional, statically-unrolled accessors keep the original
+`fstPair`/`sndPair`/`headList`/`tailList` chains (confirmed smallest: 351
+bytes once `decodeByteStringList` alone switched to `case`). -/
+
 private def fieldsOfTerm (blob : Uplc.Term) : Uplc.Term :=
   .app (.force (.force (.builtin .sndPair))) (.app (.builtin .unConstrData) blob)
 
