@@ -93,7 +93,7 @@ def zFix (f : Uplc.Term) : Uplc.Term :=
     directly to a builtin applied to the (translated) LCNF args, in order.
     Grows with the fragment. -/
 def builtinTable : List (Name × Uplc.Builtin) :=
-  [(``Int.add, .addInteger), (``Int.decLt, .lessThanInteger)]
+  [(``Int.add, .addInteger), (``Int.decLt, .lessThanInteger), (``String.decEq, .equalsString)]
 
 def applyArgs (f : Uplc.Term) (args : List Uplc.Term) : Uplc.Term :=
   args.foldl .app f
@@ -103,33 +103,6 @@ def translateArg (ctx : Ctx) : Arg → CoreM Uplc.Term
   | .erased | .type _ =>
     throwError "translator: erased/type argument reached D1 (out of fragment)"
 
-/-- Calls that don't fit the flat builtin-table shape: a self-recursive call
-    goes through the fixpoint's `self` binder; `Int.ofNat` is the identity
-    at the value level (Nat/Int share the UPLC integer constant); `Int.neg`
-    has no builtin of its own (synthesized as `0 - x`). -/
-def translateConstCall (ctx : Ctx) (declName : Name) (args : Array Arg) : CoreM Uplc.Term := do
-  if let some (selfName, selfDepth) := ctx.self then
-    if declName == selfName then
-      return applyArgs (.var (ctx.depth - 1 - selfDepth)) (← args.toList.mapM (translateArg ctx))
-  match declName, args with
-  | ``Int.ofNat, #[a] => translateArg ctx a
-  | ``Int.neg, #[a] =>
-    return .app (.app (.builtin .subtractInteger) (.const (.integer 0))) (← translateArg ctx a)
-  | _, _ =>
-    let some b := builtinTable.lookup declName
-      | throwError "translator: no builtin shim for {declName} (out of fragment for D1)"
-    applyArgs (.builtin b) <$> args.toList.mapM (translateArg ctx)
-
-/-- Other `LetValue` shapes (projections) aren't needed by the examples so
-    far. -/
-def translateLetValue (ctx : Ctx) : LetValue → CoreM Uplc.Term
-  | .const declName _us args => translateConstCall ctx declName args
-  | .lit (.nat n) => return .const (.integer (Int.ofNat n))
-  | .lit .. => throwError "translator: only Nat literals are handled so far"
-  | .fvar .. => throwError "translator: local (non-self) application not yet handled"
-  | .proj .. => throwError "translator: projections not yet handled"
-  | .erased => throwError "translator: erased let-value reached D1 (out of fragment)"
-
 /-- The constructors of an inductive type, in declaration order — which is
     also the `constr`/`case` index convention this translator uses both for
     building `case` branches here and for encoding sample inputs in tests. -/
@@ -137,6 +110,71 @@ def ctorNames (typeName : Name) : CoreM (Array Name) := do
   let some (.inductInfo info) := (← getEnv).find? typeName
     | throwError "translator: {typeName} is not an inductive type"
   return info.ctors.toArray
+
+/-- `Code.let`/`LetValue.const` self-references detect recursion; no attempt
+    to detect *mutual* recursion (non-goal, see PLAN.md). -/
+partial def codeMentionsSelf (name : Name) : Code → Bool
+  | .let decl k =>
+    (match decl.value with
+      | .const n .. => n == name
+      | _ => false) || codeMentionsSelf name k
+  | .cases cases => cases.alts.any fun alt => codeMentionsSelf name alt.getCode
+  | .fun decl k | .jp decl k => codeMentionsSelf name decl.value || codeMentionsSelf name k
+  | .return _ | .jmp .. | .unreach _ => false
+
+/- `translateConstCall`, `translateLetValue`, `translateCode`, `translateDecl`
+   and `translate` are mutually recursive: a call to another top-level decl
+   (`validate` calling the separately-defined `elem`, say — not a self-call)
+   translates that decl too and applies the result, so the translator
+   covers a call *graph*, not just one declaration at a time. No cycle
+   detection — mutually-recursive *decls* (as opposed to a decl calling
+   itself) are a stated non-goal and would just not terminate here. -/
+mutual
+
+/-- Calls that don't fit the flat builtin-table shape: a self-recursive call
+    goes through the fixpoint's `self` binder; `Int.ofNat` is the identity
+    at the value level (Nat/Int share the UPLC integer constant); `Int.neg`
+    has no builtin of its own (synthesized as `0 - x`); anything else falls
+    back to translating (and applying) that other declaration. -/
+partial def translateConstCall (ctx : Ctx) (declName : Name) (args : Array Arg) : CoreM Uplc.Term := do
+  if let some (selfName, selfDepth) := ctx.self then
+    if declName == selfName then
+      return applyArgs (.var (ctx.depth - 1 - selfDepth)) (← args.toList.mapM (translateArg ctx))
+  match declName, args with
+  | ``Int.ofNat, #[a] => translateArg ctx a
+  | ``Int.neg, #[a] =>
+    return .app (.app (.builtin .subtractInteger) (.const (.integer 0))) (← translateArg ctx a)
+  -- Bool is represented as the *builtin* bool everywhere (matches the
+  -- `cases`-on-Bool handling below), not as an SoP `constr` value like
+  -- other inductives — constructing `Bool.false`/`Bool.true` as a plain
+  -- value has to agree with that or a downstream `ifThenElse`/`equalsBool`
+  -- consumer would choke on a `constr` where it expects `(con bool _)`.
+  | ``Bool.false, #[] => return .const (.bool false)
+  | ``Bool.true, #[] => return .const (.bool true)
+  | _, _ =>
+    -- Constructor application (`List.cons`, ...): erased/type args are the
+    -- inductive's own type parameters, not real fields, so they're dropped
+    -- rather than run through the stricter `translateArg`.
+    if let some (.ctorInfo info) := (← getEnv).find? declName then
+      let fieldArgs := args.toList.filterMap fun | .fvar fvarId => some fvarId | _ => none
+      Uplc.Term.constr info.cidx <$> fieldArgs.mapM fun fvarId => return .var (← ctx.lookup fvarId)
+    else
+      match builtinTable.lookup declName with
+      | some b => applyArgs (.builtin b) <$> args.toList.mapM (translateArg ctx)
+      | none => do
+        let callee ← translate declName
+        applyArgs callee <$> args.toList.mapM (translateArg ctx)
+
+/-- Other `LetValue` shapes (projections) aren't needed by the examples so
+    far. -/
+partial def translateLetValue (ctx : Ctx) : LetValue → CoreM Uplc.Term
+  | .const declName _us args => translateConstCall ctx declName args
+  | .lit (.nat n) => return .const (.integer (Int.ofNat n))
+  | .lit (.str s) => return .const (.string s)
+  | .lit .. => throwError "translator: only Nat/String literals are handled so far"
+  | .fvar .. => throwError "translator: local (non-self) application not yet handled"
+  | .proj .. => throwError "translator: projections not yet handled"
+  | .erased => throwError "translator: erased let-value reached D1 (out of fragment)"
 
 /-- `let`/`return`; `cases` on `Bool` goes through builtin `ifThenElse`
     (open question 3 in PLAN.md: matches the census's forced-builtin idiom,
@@ -174,18 +212,7 @@ partial def translateCode (ctx : Ctx) : Code → CoreM Uplc.Term
       return .case discr branches
   | _ => throwError "translator: unsupported Code constructor (not yet handled)"
 
-/-- `Code.let`/`LetValue.const` self-references detect recursion; no attempt
-    to detect *mutual* recursion (non-goal, see PLAN.md). -/
-partial def codeMentionsSelf (name : Name) : Code → Bool
-  | .let decl k =>
-    (match decl.value with
-      | .const n .. => n == name
-      | _ => false) || codeMentionsSelf name k
-  | .cases cases => cases.alts.any fun alt => codeMentionsSelf name alt.getCode
-  | .fun decl k | .jp decl k => codeMentionsSelf name decl.value || codeMentionsSelf name k
-  | .return _ | .jmp .. | .unreach _ => false
-
-def translateDecl (decl : Decl) : CoreM Uplc.Term := do
+partial def translateDecl (decl : Decl) : CoreM Uplc.Term := do
   let .code code := decl.value
     | throwError "translator: extern declarations are not in the fragment"
   let recursive := codeMentionsSelf decl.name code
@@ -195,9 +222,11 @@ def translateDecl (decl : Decl) : CoreM Uplc.Term := do
   let paramsBody := decl.params.foldr (init := body) fun p acc => .lam p.binderName.toString acc
   return if recursive then zFix (.lam "self" paramsBody) else paramsBody
 
-def translate (declName : Name) : CoreM Uplc.Term := do
+partial def translate (declName : Name) : CoreM Uplc.Term := do
   let some decl ← getMonoDecl? declName
     | throwError "no mono LCNF for {declName}"
   translateDecl decl
+
+end
 
 end Poe.Translate

@@ -5,3 +5,4 @@ import Poe.Oracle
 import Poe.Lint
 import Poe.Examples.First
 import Poe.Examples.OutOfFragment
+import Poe.Examples.HelloWorld

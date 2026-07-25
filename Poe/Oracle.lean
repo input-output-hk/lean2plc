@@ -27,18 +27,24 @@ def runUplc (program : String) : IO String := do
 def encodeInt (i : Int) : Uplc.Term :=
   .const (.integer i)
 
-/-- Encode a `List Int` as the `constr` chain `Translate`'s `cases` handling
+def encodeString (s : String) : Uplc.Term :=
+  .const (.string s)
+
+/-- Encode a `List α` as the `constr` chain `Translate`'s `cases` handling
     expects. Constructor indices come from the same environment lookup
     `Translate.ctorNames` uses for translation, so the encoder and the
     translator can't silently disagree about which index means
     `nil`/`cons`. -/
-def encodeIntList (xs : List Int) : CoreM Uplc.Term := do
+def encodeList (elemEncode : α → Uplc.Term) (xs : List α) : CoreM Uplc.Term := do
   let ctors ← Translate.ctorNames ``List
   let some nilIdx := ctors.findIdx? (· == ``List.nil)
     | throwError "translator env: no List.nil constructor found"
   let some consIdx := ctors.findIdx? (· == ``List.cons)
     | throwError "translator env: no List.cons constructor found"
-  return xs.foldr (init := .constr nilIdx []) fun x acc => .constr consIdx [encodeInt x, acc]
+  return xs.foldr (init := .constr nilIdx []) fun x acc => .constr consIdx [elemEncode x, acc]
+
+def encodeIntList (xs : List Int) : CoreM Uplc.Term := encodeList encodeInt xs
+def encodeStringList (xs : List String) : CoreM Uplc.Term := encodeList encodeString xs
 
 /-- Translate `declName`, apply it to `args`, emit, and run through the
     oracle; returns the raw result term text (e.g. `"(con integer 42)"`). -/
@@ -49,9 +55,9 @@ def evalDecl (declName : Name) (args : List Uplc.Term) : CoreM String := do
 /-- One test case: the oracle's answer for `declName` applied to `args`,
     checked against `expected` (computed by the caller from the *actual*
     Lean function, not re-specified by hand). -/
-def check (declName : Name) (args : List Uplc.Term) (expected : Int) : CoreM (Except String Unit) := do
+def check (declName : Name) (args : List Uplc.Term) (expected : Uplc.Const) : CoreM (Except String Unit) := do
   let actual ← evalDecl declName args
-  let expectedText := emitConst (.integer expected)
+  let expectedText := emitConst expected
   if actual == expectedText then
     return .ok ()
   else
@@ -59,7 +65,7 @@ def check (declName : Name) (args : List Uplc.Term) (expected : Int) : CoreM (Ex
 
 /-- Run a batch of test cases for one declaration; prints a pass count and
     every failure (a shim bug, if any, shows up here). -/
-def runSuite (declName : Name) (cases : List (List Uplc.Term × Int)) : CoreM Unit := do
+def runSuite (declName : Name) (cases : List (List Uplc.Term × Uplc.Const)) : CoreM Unit := do
   let mut failures := 0
   for (args, expected) in cases do
     match ← check declName args expected with
