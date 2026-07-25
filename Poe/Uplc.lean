@@ -49,6 +49,7 @@ inductive Builtin
   | headList
   | tailList
   | nullList
+  | encodeUtf8
 deriving Repr, BEq
 
 /-- `Var i` is a de Bruijn index: 0 = innermost enclosing `lam`.

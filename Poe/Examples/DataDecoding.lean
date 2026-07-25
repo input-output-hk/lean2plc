@@ -4,16 +4,19 @@ import Poe.Prelude
 import Poe.PlutusData
 
 /-!
-# Minimal `Data`-decoding example
+# `Data`-decoding, building up to a real `hello_world`
 
-The on-chain-shaped counterpart of `Poe.Examples.HelloWorld`'s `elem`:
-`unBData` and `decodeByteStringList` (see `Poe.PlutusData`) translating
-end to end, real `Data` values in, not `Poe.Oracle`'s plain
-`ByteArray`/`List` terms. Never constructs a `ByteArray` literal in
-translated source (e.g. for a hard-coded expected value): that would need
-`String.toUTF8`/array-literal machinery this PoC doesn't support
-translating, so every comparison is between two `Data`-decoded inputs
-rather than one being a source-level constant.
+`validateOwnerData`/`validateSignerData` are the incremental steps that
+got `unBData`/`decodeByteStringList` (see `Poe.PlutusData`) working —
+kept around since they isolate the two primitives from each other (if a
+future regression breaks list-decoding specifically, `validateOwnerData`
+still passing says the fault isn't in `unBData` itself). Neither compares
+against a literal `ByteArray`: that would need
+`String.toUTF8`/`encodeUtf8`, which turned out to translate just fine
+(a plain 1-arg builtin call, checked directly) — so `validateHelloWorld`,
+below, is the real thing: Aiken's own `hello_world` template's shape
+(redeemer message check + datum-owner-signed check), with real `Data`
+throughout rather than `Poe.Examples.HelloWorld`'s `String` stand-ins.
 -/
 
 namespace Poe.Examples.DataDecoding
@@ -34,9 +37,18 @@ def elemBytes (x : ByteArray) : List ByteArray → Bool
 def validateSignerData (owner signatories : Data) : Unit :=
   Poe.Prelude.check (elemBytes (unBData owner) (decodeByteStringList signatories))
 
+/-- Aiken's `hello_world` template, real `Data` throughout: the redeemer
+    `message` must be exactly `"Hello, World!"`, and the datum's `owner`
+    must be among the transaction's `signatories`. -/
+def validateHelloWorld (owner message signatories : Data) : Unit :=
+  Poe.Prelude.check
+    (unBData message == "Hello, World!".toUTF8 &&
+     elemBytes (unBData owner) (decodeByteStringList signatories))
+
 #eval Poe.Lint.check ``validateOwnerData
 #eval Poe.Lint.check ``elemBytes
 #eval Poe.Lint.check ``validateSignerData
+#eval Poe.Lint.check ``validateHelloWorld
 
 def encodeBytes (s : String) : Poe.Uplc.Term := .const (.data (.b s.toUTF8))
 def encodeByteList (ss : List String) : Poe.Uplc.Term :=
@@ -56,5 +68,16 @@ def encodeByteList (ss : List String) : Poe.Uplc.Term :=
     [([encodeBytes "alice", signers], .unit)]
   Poe.Oracle.runSuiteAborts ``validateSignerData
     [[encodeBytes "mallory", signers]]
+
+/- Honest: right message, owner signed. Dishonest: wrong message; right
+   message but owner isn't a signatory. -/
+#eval show Lean.CoreM Unit from do
+  let signers := encodeByteList ["bob", "alice", "carol"]
+  Poe.Oracle.runSuite ``validateHelloWorld
+    [([encodeBytes "alice", encodeBytes "Hello, World!", signers], .unit)]
+  Poe.Oracle.runSuiteAborts ``validateHelloWorld
+    [ [encodeBytes "alice", encodeBytes "wrong message", signers]
+    , [encodeBytes "mallory", encodeBytes "Hello, World!", signers]
+    ]
 
 end Poe.Examples.DataDecoding

@@ -64,6 +64,7 @@ def builtinName : Builtin → String
   | .headList             => "headList"
   | .tailList             => "tailList"
   | .nullList             => "nullList"
+  | .encodeUtf8           => "encodeUtf8"
 
 /-- `depth` = number of enclosing binders; `var i` names the binder
     introduced at depth `depth - 1 - i`. -/

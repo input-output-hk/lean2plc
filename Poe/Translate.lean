@@ -131,7 +131,7 @@ def decodeByteStringListTerm : Uplc.Term :=
     Grows with the fragment. -/
 def builtinTable : List (Name × Uplc.Builtin) :=
   [ (``Int.add, .addInteger), (``Int.decLt, .lessThanInteger), (``String.decEq, .equalsString)
-  , (``ByteArray.instBEq.beq, .equalsByteString)
+  , (``ByteArray.instBEq.beq, .equalsByteString), (``String.toUTF8, .encodeUtf8)
   , (``Poe.PlutusData.unBData, .unBData)
   ]
 
