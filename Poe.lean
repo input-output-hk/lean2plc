@@ -9,3 +9,4 @@ import Poe.Examples.First
 import Poe.Examples.OutOfFragment
 import Poe.Examples.HelloWorld
 import Poe.Examples.DataDecoding
+import Poe.Examples.AikenHelloWorld
