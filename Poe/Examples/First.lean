@@ -53,5 +53,7 @@ theorem double_nonneg (x : Int) (h : 0 ≤ x) : 0 ≤ double x := by
   IO.println (emit (← Poe.Translate.translate ``double))
 #eval show Lean.CoreM Unit from do
   IO.println (emit (← Poe.Translate.translate ``absInt))
+#eval show Lean.CoreM Unit from do
+  IO.println (emit (← Poe.Translate.translate ``sumList))
 
 end Poe.Examples

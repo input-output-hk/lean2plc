@@ -46,14 +46,48 @@ binder), matching `Poe.Emit`'s convention.
 structure Ctx where
   depth : Nat := 0
   vars  : List (FVarId × Nat) := []
+  /-- `some (declName, bindingDepth)` while translating a self-recursive
+      decl: calls to `declName` inside its own body go through the
+      self-application fixpoint's "self" binder instead of the builtin
+      table (see `zFix` below). -/
+  self  : Option (Name × Nat) := none
 
 def Ctx.bind (ctx : Ctx) (fvarId : FVarId) : Ctx :=
-  { depth := ctx.depth + 1, vars := (fvarId, ctx.depth) :: ctx.vars }
+  { ctx with depth := ctx.depth + 1, vars := (fvarId, ctx.depth) :: ctx.vars }
 
 def Ctx.lookup (ctx : Ctx) (fvarId : FVarId) : CoreM Nat := do
   let some (_, bindingDepth) := ctx.vars.find? (·.1 == fvarId)
     | throwError "translator: unbound variable {Expr.fvar fvarId}"
   return ctx.depth - 1 - bindingDepth
+
+/-!
+## Recursion: fix via self-application
+
+UPLC has no named top-level recursive bindings, so a self-recursive `Decl`
+(`sumList` calling `sumList` by name in its own LCNF body) gets wrapped in
+the standard call-by-value fixpoint combinator (the "Z combinator", safe
+under CBV unlike the naive Y combinator since the self-application is
+guarded behind a lambda):
+
+  fix f = (λx. f (λv. x x v)) (λx. f (λv. x x v))
+
+so that `fix (λself. body[self])` reduces, on each call to `self`, back to
+`body[fix (λself. body[self])]` — tying the knot without a named binding.
+Verified standalone against the uplc oracle before wiring in (a countdown
+function via this exact combinator, 5 steps, evaluates to 5).
+-/
+
+/-- `λx. f (λv. (x x) v)`, referencing `f` as the (as yet unbound) variable
+    at de Bruijn index 1 — correct once nested directly under the `lam "f"`
+    in `zCombinator`. -/
+private def selfApp : Uplc.Term :=
+  .lam "x" (.app (.var 1) (.lam "v" (.app (.app (.var 1) (.var 1)) (.var 0))))
+
+private def zCombinator : Uplc.Term :=
+  .lam "f" (.app selfApp selfApp)
+
+def zFix (f : Uplc.Term) : Uplc.Term :=
+  .app zCombinator f
 
 /-- D1's builtin shim table (see PLAN.md): global names that translate
     directly to a builtin applied to the (translated) LCNF args, in order.
@@ -69,10 +103,14 @@ def translateArg (ctx : Ctx) : Arg → CoreM Uplc.Term
   | .erased | .type _ =>
     throwError "translator: erased/type argument reached D1 (out of fragment)"
 
-/-- Calls that don't fit the flat builtin-table shape: `Int.ofNat` is the
-    identity at the value level (Nat/Int share the UPLC integer constant),
-    and `Int.neg` has no builtin of its own (synthesized as `0 - x`). -/
+/-- Calls that don't fit the flat builtin-table shape: a self-recursive call
+    goes through the fixpoint's `self` binder; `Int.ofNat` is the identity
+    at the value level (Nat/Int share the UPLC integer constant); `Int.neg`
+    has no builtin of its own (synthesized as `0 - x`). -/
 def translateConstCall (ctx : Ctx) (declName : Name) (args : Array Arg) : CoreM Uplc.Term := do
+  if let some (selfName, selfDepth) := ctx.self then
+    if declName == selfName then
+      return applyArgs (.var (ctx.depth - 1 - selfDepth)) (← args.toList.mapM (translateArg ctx))
   match declName, args with
   | ``Int.ofNat, #[a] => translateArg ctx a
   | ``Int.neg, #[a] =>
@@ -82,20 +120,32 @@ def translateConstCall (ctx : Ctx) (declName : Name) (args : Array Arg) : CoreM 
       | throwError "translator: no builtin shim for {declName} (out of fragment for D1)"
     applyArgs (.builtin b) <$> args.toList.mapM (translateArg ctx)
 
-/-- Other `LetValue` shapes (projections, local/self application) aren't
-    needed until `sumList`. -/
+/-- Other `LetValue` shapes (projections) aren't needed by the examples so
+    far. -/
 def translateLetValue (ctx : Ctx) : LetValue → CoreM Uplc.Term
   | .const declName _us args => translateConstCall ctx declName args
   | .lit (.nat n) => return .const (.integer (Int.ofNat n))
   | .lit .. => throwError "translator: only Nat literals are handled so far"
-  | .fvar .. => throwError "translator: local/self application not yet handled"
+  | .fvar .. => throwError "translator: local (non-self) application not yet handled"
   | .proj .. => throwError "translator: projections not yet handled"
   | .erased => throwError "translator: erased let-value reached D1 (out of fragment)"
 
-/-- `let`/`return`, and `cases` on `Bool` (open question 3 in PLAN.md: cased
-    on the *builtin* bool via `ifThenElse`, not an SoP `constr`/`case` pair —
-    matches the census idiom of forced-builtin bindings). `cases` on any
-    other inductive isn't needed until `sumList`. -/
+/-- The constructors of an inductive type, in declaration order — which is
+    also the `constr`/`case` index convention this translator uses both for
+    building `case` branches here and for encoding sample inputs in tests. -/
+def ctorNames (typeName : Name) : CoreM (Array Name) := do
+  let some (.inductInfo info) := (← getEnv).find? typeName
+    | throwError "translator: {typeName} is not an inductive type"
+  return info.ctors.toArray
+
+/-- `let`/`return`; `cases` on `Bool` goes through builtin `ifThenElse`
+    (open question 3 in PLAN.md: matches the census's forced-builtin idiom,
+    not an SoP `constr`/`case` pair); `cases` on any other inductive becomes
+    a UPLC `case` over one branch per constructor, in declaration order,
+    each wrapped in a lambda per constructor field (0 fields ⇒ no wrapping,
+    per the `case` semantics of applying the branch to the fields).
+    Every constructor needs an explicit alternative — `default` alts
+    (unneeded by `sumList`) aren't handled yet. -/
 partial def translateCode (ctx : Ctx) : Code → CoreM Uplc.Term
   | .let decl k => do
     let v ← translateLetValue ctx decl.value
@@ -103,27 +153,47 @@ partial def translateCode (ctx : Ctx) : Code → CoreM Uplc.Term
     return .app (.lam decl.binderName.toString body) v
   | .return fvarId => return .var (← ctx.lookup fvarId)
   | .cases cases => do
-    unless cases.typeName == ``Bool do
-      throwError "translator: cases on {cases.typeName} not yet handled (only Bool so far)"
-    let some trueAlt := cases.alts.find? (fun | .alt n .. => n == ``Bool.true | .default _ => false)
-      | throwError "translator: Bool cases missing a Bool.true alternative"
-    let some falseAlt := cases.alts.find? (fun | .alt n .. => n == ``Bool.false | .default _ => false)
-      | throwError "translator: Bool cases missing a Bool.false alternative"
     let discr := Uplc.Term.var (← ctx.lookup cases.discr)
-    let thenBranch ← translateCode ctx trueAlt.getCode
-    let elseBranch ← translateCode ctx falseAlt.getCode
-    -- `ifThenElse` is polymorphic even in UPLC: one `force` to strip that
-    -- before applying the (strict) value args, one more to force whichever
-    -- delayed branch it returns.
-    return .force (.app (.app (.app (.force (.builtin .ifThenElse)) discr) (.delay thenBranch)) (.delay elseBranch))
+    if cases.typeName == ``Bool then
+      let some trueAlt := cases.alts.find? (fun | .alt n .. => n == ``Bool.true | .default _ => false)
+        | throwError "translator: Bool cases missing a Bool.true alternative"
+      let some falseAlt := cases.alts.find? (fun | .alt n .. => n == ``Bool.false | .default _ => false)
+        | throwError "translator: Bool cases missing a Bool.false alternative"
+      let thenBranch ← translateCode ctx trueAlt.getCode
+      let elseBranch ← translateCode ctx falseAlt.getCode
+      -- `ifThenElse` is polymorphic even in UPLC: one `force` to strip that
+      -- before applying the (strict) value args, one more to force
+      -- whichever delayed branch it returns.
+      return .force (.app (.app (.app (.force (.builtin .ifThenElse)) discr) (.delay thenBranch)) (.delay elseBranch))
+    else
+      let branches ← (← ctorNames cases.typeName).toList.mapM fun ctorName => do
+        let some (.alt _ params code) := cases.alts.find? (fun | .alt n .. => n == ctorName | .default _ => false)
+          | throwError "translator: cases on {cases.typeName} missing an alternative for {ctorName} (default alts not yet handled)"
+        let branchBody ← translateCode (params.foldl (init := ctx) (·.bind ·.fvarId)) code
+        return params.foldr (init := branchBody) fun p acc => .lam p.binderName.toString acc
+      return .case discr branches
   | _ => throwError "translator: unsupported Code constructor (not yet handled)"
+
+/-- `Code.let`/`LetValue.const` self-references detect recursion; no attempt
+    to detect *mutual* recursion (non-goal, see PLAN.md). -/
+partial def codeMentionsSelf (name : Name) : Code → Bool
+  | .let decl k =>
+    (match decl.value with
+      | .const n .. => n == name
+      | _ => false) || codeMentionsSelf name k
+  | .cases cases => cases.alts.any fun alt => codeMentionsSelf name alt.getCode
+  | .fun decl k | .jp decl k => codeMentionsSelf name decl.value || codeMentionsSelf name k
+  | .return _ | .jmp .. | .unreach _ => false
 
 def translateDecl (decl : Decl) : CoreM Uplc.Term := do
   let .code code := decl.value
     | throwError "translator: extern declarations are not in the fragment"
-  let ctx := decl.params.foldl (init := {}) (·.bind ·.fvarId)
+  let recursive := codeMentionsSelf decl.name code
+  let ctx0 : Ctx := if recursive then { depth := 1, self := some (decl.name, 0) } else {}
+  let ctx := decl.params.foldl (init := ctx0) (·.bind ·.fvarId)
   let body ← translateCode ctx code
-  return decl.params.foldr (init := body) fun p acc => .lam p.binderName.toString acc
+  let paramsBody := decl.params.foldr (init := body) fun p acc => .lam p.binderName.toString acc
+  return if recursive then zFix (.lam "self" paramsBody) else paramsBody
 
 def translate (declName : Name) : CoreM Uplc.Term := do
   let some decl ← getMonoDecl? declName
