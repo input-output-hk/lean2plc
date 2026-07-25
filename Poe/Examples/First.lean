@@ -2,16 +2,19 @@ import Poe.Uplc
 import Poe.Emit
 import Poe.Translate
 import Poe.Oracle
+import Poe.Lint
 
 /-!
 # First light
 
-Three things:
+Four things:
 1. A hand-built UPLC term + its emitted text — proves the emitter works
    before the translator exists (paste the output into `uplc evaluate`).
 2. The first fragment programs the translator will be pointed at, with the
    ordinary-Lean ghost layer they should eventually carry.
-3. D2: run each fragment program's translation through the real `uplc`
+3. D0: check each is actually accepted by the fragment linter (see
+   `Poe.Examples.OutOfFragment` for the linter rejecting something).
+4. D2: run each fragment program's translation through the real `uplc`
    oracle on generated inputs, checked against the actual Lean function
    (not a hand-copied expected value).
 -/
@@ -51,6 +54,12 @@ theorem double_nonneg (x : Int) (h : 0 ≤ x) : 0 ≤ double x := by
 #eval Poe.Translate.dumpMonoLCNF ``double
 #eval Poe.Translate.dumpMonoLCNF ``absInt
 #eval Poe.Translate.dumpMonoLCNF ``sumList
+
+/-! D0: fragment linter accepts all three (contrast with
+    `Poe.Examples.OutOfFragment`, which it rejects). -/
+#eval Poe.Lint.check ``double
+#eval Poe.Lint.check ``absInt
+#eval Poe.Lint.check ``sumList
 
 /-! D1 translator, exercised on the fragment targets so far. -/
 #eval show Lean.CoreM Unit from do
