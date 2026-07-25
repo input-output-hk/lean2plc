@@ -48,4 +48,8 @@ theorem double_nonneg (x : Int) (h : 0 ≤ x) : 0 ≤ double x := by
 #eval Poe.Translate.dumpMonoLCNF ``absInt
 #eval Poe.Translate.dumpMonoLCNF ``sumList
 
+/-! D1 translator, exercised on the first fragment target. -/
+#eval show Lean.CoreM Unit from do
+  IO.println (emit (← Poe.Translate.translate ``double))
+
 end Poe.Examples
