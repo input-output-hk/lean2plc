@@ -307,6 +307,15 @@ partial def translateCode (ctx : Ctx) : Code → CoreM Uplc.Term
     let body ← translateCode (ctx.bind decl.fvarId) k
     return .app (.lam decl.binderName.toString body) v
   | .return fvarId => return .var (← ctx.lookup fvarId)
+  -- Lean's own "this branch is unreachable" marker (printed `⊥`) — reached
+  -- via a caller-supplied proof ruling a case out (agda2hs's `error`
+  -- trick, ported: see `Poe.Prelude.poeError`). Verified directly: a
+  -- branch like `poeError "empty list"` doesn't survive as a named call
+  -- to special-case (Lean's optimizer fully inlines it away first) — it
+  -- compiles straight to this structural `Code.unreach` node instead, so
+  -- this handles it (and any other route to an impossible branch, e.g. a
+  -- bare `False.elim`) uniformly rather than by name.
+  | .unreach _ => return .error
   | .cases cases => do
     let discr := Uplc.Term.var (← ctx.lookup cases.discr)
     if cases.typeName == ``Bool then
