@@ -182,6 +182,12 @@ def builtinTable : List (Name × Uplc.Builtin) :=
   , (``ByteArray.instBEq.beq, .equalsByteString), (``String.toUTF8, .encodeUtf8)
   , (``Int.decEq, .equalsInteger)
   , (``Poe.PlutusData.unBData, .unBData)
+  -- `Int.fdiv`, not `Int.ediv`/`Int.tdiv`, and not the `/` notation
+  -- (which resolves to `Int.ediv`): checked directly against `uplc`,
+  -- real `divideInteger` floors toward -∞ (`divideInteger 7 (-2) = -4`),
+  -- which only `Int.fdiv` matches — `Int.ediv`/`Int.tdiv`/`/` all give
+  -- `-3` for that same input, silently the wrong function.
+  , (``Int.fdiv, .divideInteger)
   ]
 
 def applyArgs (f : Uplc.Term) (args : List Uplc.Term) : Uplc.Term :=

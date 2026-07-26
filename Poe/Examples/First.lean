@@ -66,6 +66,20 @@ def head (xs : List Int) (hne : xs ≠ []) : Int :=
   | [], hne => Poe.Prelude.poeError "empty list"
   | x :: _, _ => x
 
+/-- Same trick, for the division-by-zero example discussed alongside
+    `poeError`'s design: `y ≠ 0` is the caller's proof obligation, and
+    `contradiction` closes the `y = 0` branch by combining it with `hy`.
+    Uses `Int.fdiv`, *not* `/` (which resolves to `Int.ediv`) or
+    `Int.tdiv` — checked directly against `uplc`: real `divideInteger`
+    floors toward -∞ (`divideInteger 7 (-2) = -4`), which only `Int.fdiv`
+    matches; `Int.ediv`/`Int.tdiv` both give `-3` for that same input,
+    silently the wrong function had either been used instead. -/
+def divide (x y : Int) (hy : y ≠ 0) : Int :=
+  if h : y = 0 then
+    Poe.Prelude.poeError "divide by zero"
+  else
+    Int.fdiv x y
+
 /-! Once the LCNF dump works, start here: -/
 #eval Poe.Translate.dumpMonoLCNF ``double
 #eval Poe.Translate.dumpMonoLCNF ``absInt
@@ -77,6 +91,7 @@ def head (xs : List Int) (hne : xs ≠ []) : Int :=
 #eval Poe.Lint.check ``absInt
 #eval Poe.Lint.check ``sumList
 #eval Poe.Lint.check ``head
+#eval Poe.Lint.check ``divide
 
 /-! D1 translator, exercised on the fragment targets so far. -/
 #eval show Lean.CoreM Unit from do
@@ -87,6 +102,8 @@ def head (xs : List Int) (hne : xs ≠ []) : Int :=
   IO.println (emit (← Poe.Translate.translate ``sumList))
 #eval show Lean.CoreM Unit from do
   IO.println (emit (← Poe.Translate.translate ``head))
+#eval show Lean.CoreM Unit from do
+  IO.println (emit (← Poe.Translate.translate ``divide))
 
 /-! D2: oracle harness, generated inputs, checked against the real `#eval`
     value of each Lean function. -/
@@ -119,5 +136,17 @@ def testLists : List (List Int) := [[], [1], [1, 2, 3], [-3, -2, -1, 0, 1, 2, 3]
     ]
   Poe.Oracle.runSuiteAborts ``head
     [[← Poe.Oracle.encodeIntList []]]
+
+/- Includes a negative-divisor case (`7 / (-2)`) specifically because
+   that's exactly where `Int.ediv`/`Int.tdiv` would have silently
+   disagreed with real `divideInteger` had either been used instead of
+   `Int.fdiv` — floor division gives `-4`, the others give `-3`. -/
+#eval show Lean.CoreM Unit from do
+  Poe.Oracle.runSuite ``divide
+    [ ([Poe.Oracle.encodeInt 7, Poe.Oracle.encodeInt (-2)], .integer (divide 7 (-2) (by decide)))
+    , ([Poe.Oracle.encodeInt (-41), Poe.Oracle.encodeInt 5], .integer (divide (-41) 5 (by decide)))
+    ]
+  Poe.Oracle.runSuiteAborts ``divide
+    [[Poe.Oracle.encodeInt 7, Poe.Oracle.encodeInt 0]]
 
 end Poe.Examples
