@@ -19,12 +19,23 @@ monomorphized away.
 Deliberate fragment restrictions for this first increment (grow along
 with `Poe.Translate`'s own incremental history):
 
-* **Non-recursive only.** A self-recursive decl is rejected outright.
+* **Recursive decls must be non-generic** (no type-former params at all).
   `Poe.Translate`'s own recursion strategy (the Z-combinator's
   self-application `x x`) is ill-typed under TPLC without a supporting
-  recursive type — real TPLC's own recursion story goes through
-  `TyIFix`/`IWrap`/`Unwrap` (isorecursive types), a genuinely separate,
-  substantial piece of design work, not attempted here yet.
+  recursive type; `typedFix`/`fixPat`/`fixArg`/`selfTy` below implement
+  the classic isorecursive-self-application fixpoint (TAPL ch. 20),
+  generalized from a standalone countdown-function test verified
+  directly against `plc` — first attempt used the *unguarded* textbook
+  construction, which only terminates under call-by-name and looped
+  forever under UPLC/TPLC's actual call-by-value semantics (genuinely
+  OOM-killed the `plc` process at 57GB resident before the same
+  CBV-safe eta-guard `Poe.Translate.zCombinator` already uses got ported
+  in). Restricting to non-generic decls sidesteps a real complication:
+  the fixpoint's own machinery embeds the decl's function type `T` under
+  a fresh type binder it introduces (`fixArg`), so `T` needs to be a
+  *closed* `Ty` (no free `Ty.var`s) to embed safely without reshifting —
+  guaranteed automatically when there are no type-former params to
+  create a free type variable in the first place.
 * **`cases`/`constr` on `Bool`/`Decidable`/`List` only** — no other user
   inductives yet. `List` needed the most new machinery: it's a genuinely
   *recursive* type (`Cons` holds another `List`), and `Ty.sop` alone can't
@@ -96,6 +107,11 @@ structure Ctx where
   termVars  : List (FVarId × Nat) := []
   tyDepth   : Nat := 0
   tyVars    : List (FVarId × Nat) := []
+  /-- `some (declName, bindingDepth)` while translating a self-recursive
+      decl — same role as `Poe.Translate.Ctx.self`: calls to `declName`
+      inside its own body go through the fixpoint's "self" binder
+      (`typedFix`) instead of the ordinary callee/builtin lookup. -/
+  self : Option (Name × Nat) := none
 
 def Ctx.bindTerm (ctx : Ctx) (fvarId : FVarId) : Ctx :=
   { ctx with termDepth := ctx.termDepth + 1, termVars := (fvarId, ctx.termDepth) :: ctx.termVars }
@@ -155,6 +171,67 @@ def listTy (elemTy : Tplc.Ty) : Tplc.Ty :=
 def listUnrolledSop (elemTy : Tplc.Ty) : Tplc.Ty :=
   .sop [[], [elemTy, listTy elemTy]]
 
+/-!
+## Recursion: the typed isorecursive fixpoint combinator
+
+`Poe.Translate`'s untyped self-application `x x` (the Z-combinator) is
+ill-typed here — `x`'s type would need to structurally contain its own
+function type. The classic fix (TAPL ch. 20, "Recursive Types"): a
+one-constructor recursive type `SelfTy` whose *unwrapping* gives back
+`SelfTy -> T`, so `(unwrap x) x` type-checks as a genuine value of type
+`T` despite `T` itself having nothing to do with `SelfTy`.
+
+`fixPat`/`fixArg`/`selfTy` implement `PlutusCore/StdLib/Type.hs`'s own
+`makeRecursiveType0` recipe (a *0-ary* pattern functor — `T` itself is
+the "index", not a further type parameter). `typedFix`'s self-application
+is *guarded* (delayed behind one extra lambda over the function's own
+first argument) for the same reason `Poe.Translate.zCombinator`'s own
+`λv. (x x) v` is: verified directly against `plc` that the *unguarded*
+textbook version loops forever under call-by-value (it OOM-killed the
+`plc` process at 57GB resident before this guard was added), while the
+guarded version both type-checks as `(T -> T) -> T` and terminates
+correctly on a standalone countdown-function test.
+-/
+
+/-- The fixed 0-ary pattern functor `\(rec :: (*->*) -> *) (f :: *->*) ->
+    f (rec f)` — the same regardless of `T`; only `fixArg` varies. -/
+def fixPat : Tplc.Ty :=
+  .lam (.arrow (.arrow .type .type) .type)
+    (.lam (.arrow .type .type) (.app (.var 0) (.app (.var 1) (.var 0))))
+
+/-- `\(dataName :: *) -> dataName -> t` — `t` must be a *closed* `Ty` (no
+    free `Ty.var`s): it gets embedded under this fresh binder with no
+    reshifting, which `translateDecl` guarantees by only calling this for
+    non-generic recursive decls (see file doc comment). -/
+def fixArg (t : Tplc.Ty) : Tplc.Ty :=
+  .lam .type (.fn (.var 0) t)
+
+/-- `ifix fixPat (fixArg t)` — unwrapping a value of this type gives back
+    `selfTy t -> t` (confirmed directly against `plc`), letting
+    `(unwrap x) x` type-check as a genuine value of type `t`. -/
+def selfTy (t : Tplc.Ty) : Tplc.Ty :=
+  .ifix fixPat (fixArg t)
+
+/-- The typed fixpoint combinator: `(t -> t) -> t`. `argTy` is `t`'s
+    *first* argument type (`t` may itself be a multi-argument curried
+    function) — the guard only needs to delay behind *one* lambda,
+    regardless of `t`'s arity, since that alone already stops the
+    self-application from forcing itself before `f` is ever called
+    (matching `Poe.Translate.zCombinator`'s own single-argument guard). -/
+def typedFix (t argTy : Tplc.Ty) : Tplc.Term :=
+  -- de Bruijn bookkeeping (term-level depth only; no type-level binders
+  -- here): `f` is bound one level out (index 1 inside `x`'s lambda, sole
+  -- reference site is right before `v`'s lambda, hence index 1 there
+  -- too); `x` (bound by `selfApp`'s own lambda) is referenced twice
+  -- inside `v`'s lambda body, both at index 1 (one level further in);
+  -- `v` itself is index 0.
+  let selfApp : Tplc.Term :=
+    .lamAbs (selfTy t)
+      (.apply (.var 1)
+        (.lamAbs argTy
+          (.apply (.apply (.unwrap (.var 1)) (.var 1)) (.var 0))))
+  .lamAbs (.fn t t) (.apply selfApp (.iwrap fixPat (fixArg t) selfApp))
+
 /-- A type-former `Param`'s own type is bound directly (`Ty.var`, via
     `Ctx.lookupTy`); a concrete base type comes from `builtinTyTable`;
     `List α` recurses into `listTy` — no other user-defined
@@ -171,6 +248,13 @@ partial def translateTy (ctx : Ctx) : Expr → CoreM Tplc.Ty
     match builtinTyTable.lookup declName with
     | some b => return .builtin b
     | none => throwError "translateTplc: unsupported type {declName} (out of fragment)"
+  -- A non-dependent arrow (LCNF's own erased types never depend on the
+  -- bound value, so `cod` never actually mentions it) — needed to
+  -- translate a whole recursive decl's own `Decl.type` (its full curried
+  -- function type, confirmed directly to include every param: dumping
+  -- `sumList2 : List Int -> Int`'s base LCNF `decl.type` gives back
+  -- exactly `List Int -> Int`, not just the result `Int`) in one call.
+  | .forallE _ dom cod _ => return .fn (← translateTy ctx dom) (← translateTy ctx cod)
   | e =>
     if e.isAppOf ``Decidable then
       return .builtin .bool
@@ -218,12 +302,15 @@ partial def codeMentionsSelf (name : Name) : Code → Bool
 
 mutual
 
-/-- Calls that don't fit the flat builtin-table shape: `Int.ofNat`/`Int.neg`
+/-- Calls that don't fit the flat builtin-table shape: a self-recursive
+    call goes through the fixpoint's `self` binder (matching
+    `Poe.Translate.translateConstCall`'s own check); `Int.ofNat`/`Int.neg`
     as in `Poe.Translate`; anything else is another top-level decl,
-    translated (and applied/instantiated) in turn. No self-recursive case
-    at all — `translateDecl` rejects recursive decls before this is ever
-    reached. -/
+    translated (and applied/instantiated) in turn. -/
 partial def translateConstCall (ctx : Ctx) (declName : Name) (args : Array Arg) : CoreM Tplc.Term := do
+  if let some (selfName, selfDepth) := ctx.self then
+    if declName == selfName then
+      return ← applyArgsTplc ctx (.var (ctx.termDepth - 1 - selfDepth)) args
   match declName, args with
   | ``Int.ofNat, #[a] =>
     match a with
@@ -358,16 +445,15 @@ partial def translateCode (ctx : Ctx) : Code → CoreM Tplc.Term
       throwError "translateTplc: cases on {cases.typeName} not yet handled (out of fragment)"
   | _ => throwError "translateTplc: unsupported Code constructor (not yet handled)"
 
-/-- Fragment restrictions: non-recursive; type-former params precede all
-    value params (see file doc comment) — a single left-to-right ctx-build
-    pass then doubles as the scope every value param's own `Ty`
-    translation needs, since by that restriction no type param can follow
-    the value param whose annotation is being translated. -/
+/-- Fragment restrictions: type-former params precede all value params
+    (see file doc comment) — a single left-to-right ctx-build pass then
+    doubles as the scope every value param's own `Ty` translation needs,
+    since by that restriction no type param can follow the value param
+    whose annotation is being translated; recursive decls must be
+    non-generic (no type-former params at all). -/
 partial def translateDecl (decl : Decl) : CoreM Tplc.Term := do
   let .code code := decl.value
     | throwError "translateTplc: extern declarations are not in the fragment"
-  if codeMentionsSelf decl.name code then
-    throwError "translateTplc: {decl.name} is recursive — not yet supported (would need isorecursive TyIFix/IWrap/Unwrap, not Poe.Translate's untyped self-application trick, which is ill-typed here)"
   -- Ghost (`Prop`-typed, hence `lcErased`) params — e.g. a `y ≠ 0` proof —
   -- get no binder at all, matching `applyArgsTplc`'s `.erased` case at
   -- every call site (same necessity `Poe.Translate.translateDecl`'s own
@@ -375,14 +461,36 @@ partial def translateDecl (decl : Decl) : CoreM Tplc.Term := do
   -- `lcErased` itself would reach `translateTy` and fail outright, since
   -- `lcErased` isn't a real `Ty`).
   let params := decl.params.filter fun p => !p.type.isErased
-  let ctx := params.foldl (init := ({} : Ctx)) fun ctx p =>
-    if Compiler.LCNF.isTypeFormerType p.type then ctx.bindTy p.fvarId else ctx.bindTerm p.fvarId
-  let body ← translateCode ctx code
-  params.foldrM (init := body) fun p acc =>
-    if Compiler.LCNF.isTypeFormerType p.type then
-      return .tyAbs .type acc
-    else
-      return .lamAbs (← translateTy ctx p.type) acc
+  if codeMentionsSelf decl.name code then
+    if params.any fun p => Compiler.LCNF.isTypeFormerType p.type then
+      throwError "translateTplc: {decl.name} is a generic recursive decl — not yet supported (fixArg would need to embed T under a fresh binder with reshifting; see file doc comment)"
+    let some firstParam := params[0]?
+      | throwError "translateTplc: {decl.name} is recursive but takes no parameters"
+    -- `Decl.type` is the whole curried function type (confirmed
+    -- directly: `sumList2 : List Int -> Int`'s base LCNF `decl.type` is
+    -- exactly `List Int -> Int`, not just the result `Int`), so one
+    -- `translateTy` call gives `T` directly.
+    let t ← translateTy {} decl.type
+    let argTy ← translateTy {} firstParam.type
+    -- `self` is bound *before* the real params (matching
+    -- `Poe.Translate.translateDecl`'s own `ctx0 := { depth := 1, self :=
+    -- some (decl.name, 0) }`), so a self-call resolves to the fixpoint's
+    -- own outer binder rather than the builtin/callee lookup.
+    let ctx0 : Ctx := { termDepth := 1, self := some (decl.name, 0) }
+    let ctx := params.foldl (init := ctx0) (·.bindTerm ·.fvarId)
+    let body ← translateCode ctx code
+    let paramsBody ← params.foldrM (init := body) fun p acc =>
+      return Tplc.Term.lamAbs (← translateTy ctx p.type) acc
+    return .apply (typedFix t argTy) (.lamAbs t paramsBody)
+  else
+    let ctx := params.foldl (init := ({} : Ctx)) fun ctx p =>
+      if Compiler.LCNF.isTypeFormerType p.type then ctx.bindTy p.fvarId else ctx.bindTerm p.fvarId
+    let body ← translateCode ctx code
+    params.foldrM (init := body) fun p acc =>
+      if Compiler.LCNF.isTypeFormerType p.type then
+        return .tyAbs .type acc
+      else
+        return .lamAbs (← translateTy ctx p.type) acc
 
 partial def translate (declName : Name) : CoreM Tplc.Term := do
   let some decl ← CompilerM.run (getDecl? declName)

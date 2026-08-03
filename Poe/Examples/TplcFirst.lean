@@ -134,4 +134,18 @@ def emptyListTplc : List Int := []
 #eval show Lean.CoreM Unit from do
   IO.println (Poe.EmitTplc.emit (← Poe.TranslateTplc.translate ``emptyListTplc))
 
+/-! `sumList` (also from `Poe.Examples.First`) is the first genuinely
+    *recursive* target — `Poe.TranslateTplc.typedFix`/`fixPat`/`fixArg`/
+    `selfTy`, the isorecursive self-application fixpoint combinator (see
+    that file's doc comment for the CBV-vs-call-by-name bug this design
+    caught along the way). Checked directly against `plc` (20s timeout
+    guards on both calls — after the earlier OOM incident, never run a
+    freshly hand/translator-built recursive term against `plc` without
+    one): the translated term type-checks as `List Int -> Int`,
+    `sumList testListTplc` evaluates to `102` (`3 + 99`), and
+    `sumList emptyListTplc` evaluates to `0` — the base case, confirming
+    the recursion actually terminates rather than merely not crashing. -/
+#eval show Lean.CoreM Unit from do
+  IO.println (Poe.EmitTplc.emit (← Poe.TranslateTplc.translate ``Poe.Examples.sumList))
+
 end Poe.Examples
