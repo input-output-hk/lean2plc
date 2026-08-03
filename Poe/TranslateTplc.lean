@@ -25,8 +25,23 @@ with `Poe.Translate`'s own incremental history):
   recursive type — real TPLC's own recursion story goes through
   `TyIFix`/`IWrap`/`Unwrap` (isorecursive types), a genuinely separate,
   substantial piece of design work, not attempted here yet.
-* **`cases` on `Bool`/`Decidable` only** — no user inductives yet (would
-  need `Ty.sop`/`Term.constr`/`Term.case`, a separate piece of work).
+* **`cases`/`constr` on `Bool`/`Decidable`/`List` only** — no other user
+  inductives yet. `List` needed the most new machinery: it's a genuinely
+  *recursive* type (`Cons` holds another `List`), and `Ty.sop` alone can't
+  express that (a sum-of-products is a closed, finite shape — nothing
+  lets one of its fields refer back to "this same type"). Real Plutus
+  Core's own compiler needs `TyIFix`/`IWrap`/`Unwrap` for exactly this
+  reason even when using the modern SOP encoding (confirmed by reading
+  `PlutusIR/Compiler/Datatype.hs` and `PlutusCore/StdLib/Type.hs`
+  directly: `mkDatatypeType List <pattern functor body>
+  = fix (\(List :: * -> *) (a :: *) -> sop [] [a, List a])` — the `sop`
+  supplies the *shape*, `ifix` is what lets `List` appear *inside* it).
+  `listPatFunctor`/`listTy`/`listUnrolledSop` below implement exactly
+  that recipe (`makeRecursiveType1`'s single-type-parameter case),
+  verified by hand against `plc` before being wired in: a hand-built
+  `List Int` (`nil`, `cons 1 (cons 2 nil)`) type-checked, and a
+  `case`-based `head` function correctly returned `1` for the non-empty
+  list and genuinely aborted on `nil`.
   `Decidable` shows up because base LCNF still has it (`if x < 0 then...`
   is `cases` on `Decidable.isFalse`/`Decidable.isTrue`, each carrying an
   erased proof field) — `Poe.Translate`'s own mono-phase translator only
@@ -117,16 +132,40 @@ def builtinTyTable : List (Name × Tplc.TyBuiltin) :=
   , (``PUnit, .unit), (``Unit, .unit)
   ]
 
+/-- `List`'s pattern functor (see `Poe.TranslateTplc`'s recursion doc
+    comment below, and the real recipe in `PlutusCore/StdLib/Type.hs`'s
+    `makeRecursiveType1`, confirmed directly against `plc`):
+    `\(List :: * -> *) (a :: *) -> sop [] [a, [List a]]`. Fixed and
+    reusable across every element type — only the `ifix`'s second
+    argument (the element `Ty`) varies per instantiation. -/
+def listPatFunctor : Tplc.Ty :=
+  .lam (.arrow .type .type) (.lam .type (.sop [[], [.var 0, .app (.var 1) (.var 0)]]))
+
+/-- `List elemTy`, i.e. `ifix listPatFunctor elemTy` — confirmed directly
+    against `plc typecheck`. -/
+def listTy (elemTy : Tplc.Ty) : Tplc.Ty :=
+  .ifix listPatFunctor elemTy
+
+/-- The concrete (self-reference already unrolled to `listTy elemTy`) SOP
+    shape a `List elemTy` value's `Constr`/`Case` need as their own `Ty`
+    annotation — *not* the abstract pattern-functor body, which still has
+    a `List`-shaped hole in it. Matches PIR's own `mkConstructor`/`Case`
+    recipe: "the pattern functor with the hole filled in with the
+    datatype type". -/
+def listUnrolledSop (elemTy : Tplc.Ty) : Tplc.Ty :=
+  .sop [[], [elemTy, listTy elemTy]]
+
 /-- A type-former `Param`'s own type is bound directly (`Ty.var`, via
-    `Ctx.lookupTy`); anything else must be a concrete base type from
-    `builtinTyTable` — no user-defined inductives/type applications yet
-    (out of fragment, same incremental spirit as `Poe.Translate`'s own
-    `translateArg`). `Decidable ◾` (a `let`-bound `Int.decLt`/`Int.decEq`/
-    ...'s own LCNF type, its `Prop` argument already erased) is a runtime
-    bool by Lean's own convention regardless of *which* proposition it
-    decides — same reasoning as `translateCode`'s `.cases` handling
-    collapsing `Decidable.isFalse`/`isTrue` into the `Bool` case. -/
-def translateTy (ctx : Ctx) : Expr → CoreM Tplc.Ty
+    `Ctx.lookupTy`); a concrete base type comes from `builtinTyTable`;
+    `List α` recurses into `listTy` — no other user-defined
+    inductives/type applications yet (out of fragment, same incremental
+    spirit as `Poe.Translate`'s own `translateArg`). `Decidable ◾` (a
+    `let`-bound `Int.decLt`/`Int.decEq`/...'s own LCNF type, its `Prop`
+    argument already erased) is a runtime bool by Lean's own convention
+    regardless of *which* proposition it decides — same reasoning as
+    `translateCode`'s `.cases` handling collapsing
+    `Decidable.isFalse`/`isTrue` into the `Bool` case. -/
+partial def translateTy (ctx : Ctx) : Expr → CoreM Tplc.Ty
   | .fvar fvarId => return .var (← ctx.lookupTy fvarId)
   | .const declName _ =>
     match builtinTyTable.lookup declName with
@@ -135,6 +174,8 @@ def translateTy (ctx : Ctx) : Expr → CoreM Tplc.Ty
   | e =>
     if e.isAppOf ``Decidable then
       return .builtin .bool
+    else if e.isAppOfArity ``List 1 then
+      return listTy (← translateTy ctx e.appArg!)
     else
       throwError "translateTplc: unsupported type expression {e} (out of fragment)"
 
@@ -197,11 +238,30 @@ partial def translateConstCall (ctx : Ctx) (declName : Name) (args : Array Arg) 
   -- at any other type, so its own result `Ty` needs no lookup at all.
   | ``Poe.Prelude.abort, _ => return .error (.builtin .unit)
   | _, _ =>
-    match builtinTable.lookup declName with
-    | some b => applyArgsTplc ctx (.builtin b) args
-    | none => do
-      let callee ← translate declName
-      applyArgsTplc ctx callee args
+    if let some (.ctorInfo info) := (← getEnv).find? declName then
+      -- Only `List`'s two constructors, for now (see file doc comment) —
+      -- any other inductive's constructor is out of fragment. Unlike
+      -- `Poe.Translate`'s untyped `constr` (a bare tag + fields, no type
+      -- needed at all), a *typed* `Constr` needs the concrete, unrolled
+      -- SOP `Ty` — which needs the element type, recovered from the
+      -- constructor's own `Arg.type` (e.g. `@List.cons Int head tail`) —
+      -- and the whole thing wrapped in `IWrap` to actually produce a
+      -- `List elemTy`-typed value, confirmed directly against `plc`.
+      if info.induct == ``List then
+        let some elemTyExpr := args.toList.findSome? fun | .type e => some e | _ => none
+          | throwError "translateTplc: {declName} missing its element-type argument"
+        let elemTy ← translateTy ctx elemTyExpr
+        let fields ← (args.toList.filterMap fun | .fvar fvarId => some fvarId | _ => none).mapM
+          fun fvarId => return Tplc.Term.var (← ctx.lookupTerm fvarId)
+        return .iwrap listPatFunctor elemTy (.constr (listUnrolledSop elemTy) info.cidx fields)
+      else
+        throwError "translateTplc: constructors of {info.induct} not yet handled (only List, out of fragment)"
+    else
+      match builtinTable.lookup declName with
+      | some b => applyArgsTplc ctx (.builtin b) args
+      | none => do
+        let callee ← translate declName
+        applyArgsTplc ctx callee args
 
 /-- Other `LetValue` shapes (projections, non-self local application)
     aren't needed by the examples so far, same restriction as
@@ -272,6 +332,28 @@ partial def translateCode (ctx : Ctx) : Code → CoreM Tplc.Term
       -- variable equally well (it's unused in the body), so `resultTy`
       -- itself is as good a choice as any.
       return .tyInst scrutinee resultTy
+    else if cases.typeName == ``List then
+      let some nilAlt := cases.alts.find? (fun | .alt n .. => n == ``List.nil | .default _ => false)
+        | throwError "translateTplc: List cases missing a List.nil alternative"
+      let some (.alt _ consParams consCode) :=
+          cases.alts.find? (fun | .alt n .. => n == ``List.cons | .default _ => false)
+        | throwError "translateTplc: List cases missing a List.cons alternative"
+      let #[headParam, tailParam] := consParams
+        | throwError "translateTplc: List.cons alternative has the wrong number of fields"
+      -- 0-field `nil` branch is a bare term (no wrapping), matching real
+      -- `Case`'s own calling convention — same rule `Poe.Translate`'s own
+      -- SOP `case` handling already relies on for 0-field constructors.
+      let nilBranch ← translateCode ctx nilAlt.getCode
+      let consCtx := (ctx.bindTerm headParam.fvarId).bindTerm tailParam.fvarId
+      let consBody ← translateCode consCtx consCode
+      let headTy ← translateTy ctx headParam.type
+      let tailTy ← translateTy ctx tailParam.type
+      let consBranch := Tplc.Term.lamAbs headTy (.lamAbs tailTy consBody)
+      let resultTy ← translateTy ctx cases.resultType
+      let scrutinee := Tplc.Term.unwrap (.var (← ctx.lookupTerm cases.discr))
+      -- Branch order = declaration order (`nil` = 0, `cons` = 1), same
+      -- convention `Poe.Translate`'s own `ctorNames`-ordered `case` uses.
+      return .case resultTy scrutinee [nilBranch, consBranch]
     else
       throwError "translateTplc: cases on {cases.typeName} not yet handled (out of fragment)"
   | _ => throwError "translateTplc: unsupported Code constructor (not yet handled)"

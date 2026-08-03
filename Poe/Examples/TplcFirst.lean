@@ -115,4 +115,23 @@ def genericId {α : Type} (x : α) : α := x
 #eval show Lean.CoreM Unit from do
   IO.println (Poe.EmitTplc.emit (← Poe.TranslateTplc.translate ``Poe.Examples.divide))
 
+/-! `head` (also from `Poe.Examples.First`) is the first target needing
+    `List`'s `cases`/`constr` support (`Poe.TranslateTplc.listPatFunctor`/
+    `listTy`/`listUnrolledSop`, the isorecursive pattern-functor encoding
+    — see that file's doc comment). Checked directly against `plc`,
+    including constructing the *input* list via the same translator (not
+    a hand-built term): `testListTplc`/`emptyListTplc` below both
+    type-check as `List Int` (`ifix ...`), `head`'s own translated term
+    type-checks as `List Int -> Int`, `head testListTplc` evaluates to
+    `3`, and `head emptyListTplc` genuinely aborts. -/
+def testListTplc : List Int := [3, 99]
+def emptyListTplc : List Int := []
+
+#eval show Lean.CoreM Unit from do
+  IO.println (Poe.EmitTplc.emit (← Poe.TranslateTplc.translate ``Poe.Examples.head))
+#eval show Lean.CoreM Unit from do
+  IO.println (Poe.EmitTplc.emit (← Poe.TranslateTplc.translate ``testListTplc))
+#eval show Lean.CoreM Unit from do
+  IO.println (Poe.EmitTplc.emit (← Poe.TranslateTplc.translate ``emptyListTplc))
+
 end Poe.Examples
