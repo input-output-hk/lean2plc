@@ -25,10 +25,30 @@ with `Poe.Translate`'s own incremental history):
   recursive type — real TPLC's own recursion story goes through
   `TyIFix`/`IWrap`/`Unwrap` (isorecursive types), a genuinely separate,
   substantial piece of design work, not attempted here yet.
-* **No `cases` yet** (so no `Bool` branching, no user inductives) —
-  `ifThenElse`'s real TPLC-typed signature (a `TyInst`-instantiated
-  builtin, not `Poe.Uplc`'s force/delay-based one) hasn't been pinned
-  down against the real `plc` type-checker yet.
+* **`cases` on `Bool`/`Decidable` only** — no user inductives yet (would
+  need `Ty.sop`/`Term.constr`/`Term.case`, a separate piece of work).
+  `Decidable` shows up because base LCNF still has it (`if x < 0 then...`
+  is `cases` on `Decidable.isFalse`/`Decidable.isTrue`, each carrying an
+  erased proof field) — `Poe.Translate`'s own mono-phase translator only
+  ever sees `Bool` because monomorphization has already collapsed
+  `Decidable` down to a plain runtime bool by the time it looks; base
+  phase hasn't done that collapse yet, confirmed directly by comparing
+  `Poe.Translate.dumpMonoLCNF`/`dumpBaseLCNF` on the same declaration.
+  Bool/Decidable branching itself *is* handled (see `translateCode`'s
+  `.cases` case): real
+  `ifThenElse : all a. bool -> a -> a -> a` (confirmed directly against
+  `PlutusCore/Default/Builtins.hs`), instantiated via `TyInst` at a
+  *thunk* type `all t. a` rather than at `a` directly, with each branch
+  wrapped in a matching `TyAbs .type` — TPLC has no `Force`/`Delay` term
+  formers at all (unlike `Poe.Uplc.Term`), so the untyped translator's own
+  delay/force idiom for keeping `ifThenElse`'s eager builtin call lazy per
+  branch has to be *reconstructed* from the very mechanism `eraseTerm`
+  maps down to it (`TyAbs → Delay`, `TyInst → Force`) — i.e. a thunk is a
+  term abstracted over an unused type variable, forced by instantiating
+  that dummy variable at any (irrelevant) closed type. Confirmed directly
+  against `plc`: typechecks, evaluates the selected branch correctly, and
+  — critically — genuinely never evaluates the *other* branch (an
+  `error` planted in the unselected branch does not fire).
 * **Type-former params must precede all value params** in a decl's
   parameter list (matches idiomatic Lean style, `{α β : Type} (x : α) ...`)
   — lets a single left-to-right pass over `decl.params` double as the
@@ -68,6 +88,16 @@ def Ctx.bindTerm (ctx : Ctx) (fvarId : FVarId) : Ctx :=
 def Ctx.bindTy (ctx : Ctx) (fvarId : FVarId) : Ctx :=
   { ctx with tyDepth := ctx.tyDepth + 1, tyVars := (fvarId, ctx.tyDepth) :: ctx.tyVars }
 
+/-- Bump `tyDepth` for a synthetic (translation-introduced, not a real
+    LCNF `Param`) type binder — the dummy `TyAbs .type` a thunk wraps a
+    branch body in. Nothing can ever look this binder up by `FVarId`
+    (there isn't one), but any *real* `Ty.var` reference already inside
+    the branch body still needs its index shifted by the new enclosing
+    binder, exactly as `Poe.EmitTplc.emitTerm`'s own `tyDepth + 1` does
+    for `Term.tyAbs`. -/
+def Ctx.bindTyAnon (ctx : Ctx) : Ctx :=
+  { ctx with tyDepth := ctx.tyDepth + 1 }
+
 def Ctx.lookupTerm (ctx : Ctx) (fvarId : FVarId) : CoreM Nat := do
   let some (_, bindingDepth) := ctx.termVars.find? (·.1 == fvarId)
     | throwError "translateTplc: unbound term variable {Expr.fvar fvarId}"
@@ -91,14 +121,22 @@ def builtinTyTable : List (Name × Tplc.TyBuiltin) :=
     `Ctx.lookupTy`); anything else must be a concrete base type from
     `builtinTyTable` — no user-defined inductives/type applications yet
     (out of fragment, same incremental spirit as `Poe.Translate`'s own
-    `translateArg`). -/
+    `translateArg`). `Decidable ◾` (a `let`-bound `Int.decLt`/`Int.decEq`/
+    ...'s own LCNF type, its `Prop` argument already erased) is a runtime
+    bool by Lean's own convention regardless of *which* proposition it
+    decides — same reasoning as `translateCode`'s `.cases` handling
+    collapsing `Decidable.isFalse`/`isTrue` into the `Bool` case. -/
 def translateTy (ctx : Ctx) : Expr → CoreM Tplc.Ty
   | .fvar fvarId => return .var (← ctx.lookupTy fvarId)
   | .const declName _ =>
     match builtinTyTable.lookup declName with
     | some b => return .builtin b
     | none => throwError "translateTplc: unsupported type {declName} (out of fragment)"
-  | e => throwError "translateTplc: unsupported type expression {e} (out of fragment)"
+  | e =>
+    if e.isAppOf ``Decidable then
+      return .builtin .bool
+    else
+      throwError "translateTplc: unsupported type expression {e} (out of fragment)"
 
 /-- D1's builtin shim table, same declName → `Poe.Uplc.Builtin` mapping
     `Poe.Translate.builtinTable` uses — `Poe.Tplc.Term.builtin` wraps the
@@ -176,9 +214,9 @@ partial def translateLetValue (ctx : Ctx) : LetValue → CoreM Tplc.Term
   | .proj .. => throwError "translateTplc: projections not yet handled"
   | .erased => throwError "translateTplc: erased let-value reached D1 (out of fragment)"
 
-/-- `let`/`return` only — no `cases` yet (see file doc comment: `Bool`
-    branching needs `ifThenElse`'s real TPLC-typed signature pinned down
-    first). -/
+/-- `let`/`return`/`unreach`, plus `cases` on `Bool` (see file doc comment
+    for the thunk-via-`TyAbs`/`TyInst` encoding `ifThenElse` needs — no
+    other inductive's `cases` is handled yet). -/
 partial def translateCode (ctx : Ctx) : Code → CoreM Tplc.Term
   | .let decl k => do
     let v ← translateLetValue ctx decl.value
@@ -188,8 +226,53 @@ partial def translateCode (ctx : Ctx) : Code → CoreM Tplc.Term
     -- (untyped UPLC's `lam` carries no type annotation at all).
     return .apply (.lamAbs (← translateTy ctx decl.type) body) v
   | .return fvarId => return .var (← ctx.lookupTerm fvarId)
-  | .unreach _ => throwError "translateTplc: unreach/error needs a result Ty annotation, not yet handled"
-  | .cases _ => throwError "translateTplc: cases/branching not yet handled (out of fragment)"
+  -- `Code.unreach` already carries its own result `Ty` (LCNF needs this
+  -- to keep the surrounding code type-correct even though the branch is
+  -- dead) — exactly the annotation `Tplc.Term.error` itself requires,
+  -- so no extra bookkeeping is needed beyond `translateTy`.
+  | .unreach ty => return .error (← translateTy ctx ty)
+  | .cases cases => do
+    -- `if`/`decide`-style branching on an `Int`/`String`/... comparison
+    -- goes through `Decidable`, not `Bool`, directly: confirmed directly
+    -- (`absInt`'s base LCNF dump shows `cases _x.3 : Int | Decidable.isFalse
+    -- x.4 | Decidable.isTrue x.5`, each alt carrying one `Prop`-erased
+    -- proof field) — `Poe.Translate`'s own mono-phase translator never
+    -- sees this, since monomorphization has already collapsed `Decidable`
+    -- down to a plain runtime `Bool` by the time it looks. Both cases are
+    -- otherwise identical: the discriminant is a real runtime bool either
+    -- way, and any ctor field (`Decidable`'s erased proof; `Bool` has
+    -- none) is dropped rather than bound.
+    let trueName  := if cases.typeName == ``Decidable then ``Decidable.isTrue else ``Bool.true
+    let falseName := if cases.typeName == ``Decidable then ``Decidable.isFalse else ``Bool.false
+    if cases.typeName == ``Bool || cases.typeName == ``Decidable then
+      let some trueAlt := cases.alts.find? (fun | .alt n .. => n == trueName | .default _ => false)
+        | throwError "translateTplc: {cases.typeName} cases missing a {trueName} alternative"
+      let some falseAlt := cases.alts.find? (fun | .alt n .. => n == falseName | .default _ => false)
+        | throwError "translateTplc: {cases.typeName} cases missing a {falseName} alternative"
+      let discr := Tplc.Term.var (← ctx.lookupTerm cases.discr)
+      -- Each branch sits under one synthetic type binder (the thunk's
+      -- `TyAbs .type`), so any real `Ty.var` it references needs shifting
+      -- — `Ctx.bindTyAnon`, not `ctx` itself.
+      let thenBranch ← translateCode ctx.bindTyAnon trueAlt.getCode
+      let elseBranch ← translateCode ctx.bindTyAnon falseAlt.getCode
+      let resultTy ← translateTy ctx cases.resultType
+      -- `all t. resultTy` — the thunk type `ifThenElse`'s own type
+      -- parameter gets instantiated to, confirmed directly against `plc`
+      -- (both branch selection *and* the unselected branch's genuine
+      -- non-evaluation).
+      let thunkTy := Tplc.Ty.forall_ .type resultTy
+      let scrutinee :=
+        Tplc.Term.apply
+          (Tplc.Term.apply
+            (Tplc.Term.apply (.tyInst (.builtin .ifThenElse) thunkTy) discr)
+            (.tyAbs .type thenBranch))
+          (.tyAbs .type elseBranch)
+      -- Force the thunked result: any closed type instantiates the dummy
+      -- variable equally well (it's unused in the body), so `resultTy`
+      -- itself is as good a choice as any.
+      return .tyInst scrutinee resultTy
+    else
+      throwError "translateTplc: cases on {cases.typeName} not yet handled (out of fragment)"
   | _ => throwError "translateTplc: unsupported Code constructor (not yet handled)"
 
 /-- Fragment restrictions: non-recursive; type-former params precede all

@@ -85,4 +85,20 @@ def genericId {α : Type} (x : α) : α := x
 #eval show Lean.CoreM Unit from do
   IO.println (Poe.EmitTplc.emit (← Poe.TranslateTplc.translate ``Poe.Examples.double))
 
+/-! `absInt` (also from `Poe.Examples.First`) is the first `Bool`-branching
+    target: base LCNF's `if x < 0 then ...` turns out to be `cases` on
+    `Decidable.isFalse`/`Decidable.isTrue`, not plain `Bool` — mono-phase
+    LCNF has already collapsed that down to `Bool.false`/`Bool.true` by
+    the time `Poe.Translate` looks (confirmed directly by comparing
+    `dumpMonoLCNF`/`Poe.TranslateTplc.dumpBaseLCNF` side by side), so this
+    is a genuinely new case the untyped translator never had to handle.
+    The translated term was checked directly against `plc`: type-checks
+    as `(fun (con integer) (con integer))`, and evaluates correctly on
+    all three of `absInt (-5) = 5`, `absInt 0 = 0`, `absInt 7 = 7` — the
+    last two specifically to confirm the `ifThenElse` thunk encoding
+    (see `Poe.TranslateTplc`'s doc comment) picks the *correct* branch in
+    both directions, not just that *a* branch evaluates without error. -/
+#eval show Lean.CoreM Unit from do
+  IO.println (Poe.EmitTplc.emit (← Poe.TranslateTplc.translate ``Poe.Examples.absInt))
+
 end Poe.Examples
