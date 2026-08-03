@@ -1,6 +1,7 @@
 import Poe.Uplc
 import Poe.Tplc
 import Poe.Emit
+import Poe.EmitTplc
 import Poe.Prelude
 import Poe.PlutusData
 import Poe.Translate
