@@ -1,5 +1,7 @@
 import Poe.Tplc
 import Poe.EmitTplc
+import Poe.TranslateTplc
+import Poe.Examples.First
 
 /-!
 # First light, typed backend
@@ -50,5 +52,37 @@ def tplcAppliedPoly : Term :=
   .apply (.tyInst tplcPolyIdentity (.builtin .integer)) (.constant (.integer 42))
 
 #eval Poe.EmitTplc.emit tplcAppliedPoly
+
+/-! ## D1 (typed): first translator targets
+
+`Poe.TranslateTplc.translate`, the real base-LCNF → `Tplc.Term`
+translator (not hand-built), exercised on two functions and checked
+directly against `plc` (not just eyeballed):
+
+* `double` (from `Poe.Examples.First`, monomorphic — no genuine
+  polymorphism involved) translates to a term that `plc typecheck`s as
+  `(fun (con integer) (con integer))` and `plc evaluate`s applied to `5`
+  as `(con integer 10)`.
+* `genericId` (genuinely polymorphic — the reason this whole second
+  backend exists) translates to *exactly* `tplcPolyIdentity` above,
+  `Term.tyAbs .type (Term.lamAbs (Ty.var 0) (Term.var 0))` — a real,
+  non-hand-built reproduction of the same term already `plc`-verified
+  above, this time produced by reading `α`'s `Param` (a type-former,
+  hence wrapped in `tyAbs`) and its call-site `Arg.type` instantiations
+  straight out of base LCNF instead of being written down by hand. -/
+
+/-- Genuinely polymorphic (unlike everything in `Poe.Examples.First`
+    so far): `α`'s own `Param.type` is a type former (`Type`), so
+    `Poe.TranslateTplc.translateDecl` wraps it in `Term.tyAbs` rather
+    than a value-level `Term.lamAbs` — the first fragment function this
+    translator can't even represent in the untyped backend without first
+    monomorphizing it away. -/
+def genericId {α : Type} (x : α) : α := x
+
+#eval show Lean.CoreM Unit from do
+  IO.println (Poe.EmitTplc.emit (← Poe.TranslateTplc.translate ``genericId))
+
+#eval show Lean.CoreM Unit from do
+  IO.println (Poe.EmitTplc.emit (← Poe.TranslateTplc.translate ``Poe.Examples.double))
 
 end Poe.Examples
