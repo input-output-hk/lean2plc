@@ -1,12 +1,13 @@
 {
-  description = "Poe: dev shell with elan (for the pinned Lean toolchain) and the uplc oracle";
+  description = "Poe: dev shell with elan (for the pinned Lean toolchain) and the uplc/plc oracles";
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
     flake-utils.url = "github:numtide/flake-utils";
 
-    # Only used for its `uplc` executable (the execution oracle, see PLAN.md).
-    # Not a Lean/Lake dependency of Poe itself.
+    # Only used for their `uplc`/`plc` executables (the untyped and typed
+    # execution/typecheck oracles, see PLAN.md). Not a Lean/Lake dependency
+    # of Poe itself.
     plutus.url = "github:input-output-hk/plutus";
   };
 
@@ -20,6 +21,7 @@
           packages = [
             pkgs.elan
             plutus.packages.${system}.uplc
+            plutus.packages.${system}.plc
           ];
         };
       });
