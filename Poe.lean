@@ -11,3 +11,4 @@ import Poe.Examples.HelloWorldString
 import Poe.Examples.DataDecoding
 import Poe.Examples.AikenHelloWorld
 import Poe.Examples.HelloWorld
+import Poe.Examples.IdealValidator
