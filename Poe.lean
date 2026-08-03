@@ -1,4 +1,5 @@
 import Poe.Uplc
+import Poe.Tplc
 import Poe.Emit
 import Poe.Prelude
 import Poe.PlutusData
