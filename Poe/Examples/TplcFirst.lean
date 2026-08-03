@@ -101,4 +101,18 @@ def genericId {α : Type} (x : α) : α := x
 #eval show Lean.CoreM Unit from do
   IO.println (Poe.EmitTplc.emit (← Poe.TranslateTplc.translate ``Poe.Examples.absInt))
 
+/-! `divide` (also from `Poe.Examples.First`) exercises two more things at
+    once: its `hy : y ≠ 0` proof parameter is dropped entirely (LCNF's
+    `lcErased` type on that `Param`, filtered the same way
+    `Poe.Translate.translateDecl` already had to), and its `poeError`
+    branch (`Code.unreach`) becomes `Term.error`, both inside a
+    `Decidable`-branching `ifThenElse`. Checked directly against `plc`:
+    type-checks as `(fun (con integer) (fun (con integer) (con integer)))`
+    (exactly two params, confirming the proof really is gone from the
+    compiled arity), `divide 7 (-2)` evaluates to `-4` (floor division,
+    the same `divideInteger`/`Int.fdiv` correspondence `Poe.Translate`
+    already relies on), and `divide 7 0` genuinely aborts. -/
+#eval show Lean.CoreM Unit from do
+  IO.println (Poe.EmitTplc.emit (← Poe.TranslateTplc.translate ``Poe.Examples.divide))
+
 end Poe.Examples

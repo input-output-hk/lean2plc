@@ -193,8 +193,9 @@ partial def translateConstCall (ctx : Ctx) (declName : Name) (args : Array Arg) 
     | .fvar fvarId =>
       return .apply (.apply (.builtin .subtractInteger) (.constant (.integer 0))) (.var (← ctx.lookupTerm fvarId))
     | _ => throwError "translateTplc: Int.neg applied to a non-value argument"
-  | ``Poe.Prelude.abort, _ =>
-    throwError "translateTplc: Poe.Prelude.abort needs a result Ty annotation, not yet handled"
+  -- `abort`'s Lean type is the concrete `Unit → Unit`, never instantiated
+  -- at any other type, so its own result `Ty` needs no lookup at all.
+  | ``Poe.Prelude.abort, _ => return .error (.builtin .unit)
   | _, _ =>
     match builtinTable.lookup declName with
     | some b => applyArgsTplc ctx (.builtin b) args
@@ -285,10 +286,17 @@ partial def translateDecl (decl : Decl) : CoreM Tplc.Term := do
     | throwError "translateTplc: extern declarations are not in the fragment"
   if codeMentionsSelf decl.name code then
     throwError "translateTplc: {decl.name} is recursive — not yet supported (would need isorecursive TyIFix/IWrap/Unwrap, not Poe.Translate's untyped self-application trick, which is ill-typed here)"
-  let ctx := decl.params.foldl (init := ({} : Ctx)) fun ctx p =>
+  -- Ghost (`Prop`-typed, hence `lcErased`) params — e.g. a `y ≠ 0` proof —
+  -- get no binder at all, matching `applyArgsTplc`'s `.erased` case at
+  -- every call site (same necessity `Poe.Translate.translateDecl`'s own
+  -- identical filter documents: without it, a param whose type is
+  -- `lcErased` itself would reach `translateTy` and fail outright, since
+  -- `lcErased` isn't a real `Ty`).
+  let params := decl.params.filter fun p => !p.type.isErased
+  let ctx := params.foldl (init := ({} : Ctx)) fun ctx p =>
     if Compiler.LCNF.isTypeFormerType p.type then ctx.bindTy p.fvarId else ctx.bindTerm p.fvarId
   let body ← translateCode ctx code
-  decl.params.foldrM (init := body) fun p acc =>
+  params.foldrM (init := body) fun p acc =>
     if Compiler.LCNF.isTypeFormerType p.type then
       return .tyAbs .type acc
     else
