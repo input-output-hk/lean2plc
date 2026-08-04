@@ -6,27 +6,38 @@ import Poe.Examples.First
 /-!
 # D5 (stretch): the increment-2 bridge to PlutusCoreBlaster
 
-`Poe.Uplc.Term`/`Const`/`Builtin`/`Program` were deliberately built
-isomorphic, constructor for constructor, to Blaster's own
-`PlutusCore.UPLC.Term.Term`/`Const`/`BuiltinFun`/`Program` — confirmed
-directly by reading Blaster's source, not assumed. This file is exactly
-the "mechanical injection" `Poe.Uplc`'s own doc comment already promised:
-a total, structural embedding, no partiality or cleverness needed for
-`Term`/`BuiltinFun` at all.
+`Poe.Uplc.Term`/`Builtin`/`Program` were deliberately built isomorphic,
+constructor for constructor, to Blaster's own
+`PlutusCore.UPLC.Term.Term`/`BuiltinFun`/`Program` — confirmed directly by
+reading Blaster's source, not assumed. `toBlasterTerm`/`toBlasterBuiltin`/
+`toBlasterProgram` below are exactly the "mechanical injection"
+`Poe.Uplc`'s own doc comment already promised: a total, structural
+embedding, no partiality or cleverness needed. `Const`/`DataValue` are
+*not* full isomorphisms (an earlier version of this comment claimed
+otherwise — corrected after an independent review caught it, not found by
+the author): they're a deliberate embedding of only the sub-fragment Poe
+needs, into Blaster's real, larger `Const`/`Data` types (see `Poe.Uplc`'s
+own doc comment for specifics).
 
-**One real gap, found by actually trying this rather than assuming it
-away**: Blaster's `ByteString` is backed by a Lean `String`
-(`structure ByteString where data : String`), not a `ByteArray` like
-`Poe.Uplc`'s own `Const.bytestring`. These are *not* interchangeable —
-an arbitrary byte sequence is not valid UTF-8, so there is no honest,
-total `ByteArray → Blaster.ByteString` embedding via simple
-reinterpretation. `toBlasterConst`/`toBlasterData` below are left
-unimplemented (`sorry`) for `bytestring`/`data`, flagged explicitly
-rather than silently doing something wrong — resolving this (probably:
-Blaster gaining a real byte-sequence representation, or Poe restricting
-this specific certificate direction to the ByteArray-free part of the
-fragment) is follow-up scoping work, not something to paper over here.
--/
+**Two real gaps, found by actually trying this rather than assuming it
+away**:
+
+* Blaster's `ByteString` is backed by a Lean `String`
+  (`structure ByteString where data : String`), not a `ByteArray` like
+  `Poe.Uplc`'s own `Const.bytestring`. These are *not* interchangeable —
+  an arbitrary byte sequence is not valid UTF-8, so there is no honest,
+  total `ByteArray → Blaster.ByteString` embedding via simple
+  reinterpretation. `toBlasterConst`/`toBlasterData` below are left
+  unimplemented (`sorry`) for `bytestring`/`data`, flagged explicitly
+  rather than silently doing something wrong — resolving this (probably:
+  Blaster gaining a real byte-sequence representation, or Poe restricting
+  this specific certificate direction to the `ByteArray`-free part of the
+  fragment) is follow-up scoping work, not something to paper over here.
+* `Poe.Uplc.DataValue` itself is missing two of real `Data`'s five cases
+  (`Map` *and* `I`, integer-as-`Data` — see `Poe.Uplc`'s own doc comment),
+  not just the one this file's comment previously claimed. Independent of
+  the `ByteString` gap above, this means `toBlasterData` can't represent
+  an integer-literal `Data` value at all yet either. -/
 
 namespace Poe.Bridge
 
@@ -115,9 +126,23 @@ matching the same "hand-built term, checked to match the real
 translator's output" methodology `Poe.Examples.First`'s own opening
 section already uses.
 
+**Correction (found by an independent adversarial review, not by the
+author):** the first version of this transcription dropped the
+`let`-desugared identity-continuation wrapper (`(lam x1 x1) [...]`)
+`Poe.Translate.translateCode`'s `.let` case *always* emits (`.app (.lam
+_ body) v`, visible in every dumped example in `Poe.Examples.First`,
+e.g. `head`/`divide`'s own `[(lam x2 x2) ...]` wrappers) — a real gap
+between what this file claimed to certify and what it actually
+matched. Confirmed directly (`#eval Poe.Emit.emit (←
+Poe.Translate.translate ``Poe.Examples.double)`) that the real output
+is `(lam x0 [(lam x1 x1) [[(builtin addInteger) x0] x0]])`, and that it
+needs 20 CEK steps to `Halt`, not 15 — the version below is the
+corrected, byte-identical transcription, re-verified against the real
+translator's own emitted text, not eyeballed.
+
 **Actually proved**, not just stated (D5's own bar was only "state, not
 necessarily prove" — this clears it): traced by hand and cross-checked
-against `#eval`, 15 CEK steps exactly reach `Halt` for any input
+against `#eval`, 20 CEK steps exactly reach `Halt` for any input
 (`AddInteger`'s own evaluation never branches on its operands' specific
 values, so the same fixed step count works for every `x`, not just the
 ones tried) — and, found empirically rather than assumed, plain `rfl`
@@ -126,7 +151,10 @@ discharges the whole thing: the kernel unfolds `toBlasterTerm`/
 without ever needing to know its concrete value. -/
 
 def doubleUplcTerm : Poe.Uplc.Term :=
-  .lam "x" (.app (.app (.builtin .addInteger) (.var 0)) (.var 0))
+  .lam "x0"
+    (.app
+      (.lam "x1" (.var 0))
+      (.app (.app (.builtin .addInteger) (.var 0)) (.var 0)))
 
 def doubleProgram : Poe.Uplc.Program :=
   .program (1, 1, 0) doubleUplcTerm
@@ -140,7 +168,7 @@ theorem double_certificate :
       = PlutusCore.UPLC.CekMachine.State.Halt
           (PlutusCore.UPLC.CekValue.CekValue.VCon (.Integer (Poe.Examples.double x))) := by
   intro x
-  refine ⟨15, ?_⟩
+  refine ⟨20, ?_⟩
   -- `toBlasterTerm`/`toBlasterProgram` don't reduce via bare `rfl`
   -- (found empirically, not assumed) — their auto-generated equation
   -- lemmas unfold them fine, and the CEK machine's own internals
