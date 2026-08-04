@@ -5,6 +5,7 @@ import Poe.PlutusData
 import Poe.Examples.DataDecoding
 import Poe.TranslateTplc
 import Poe.EmitTplc
+import Poe.TplcOracle
 
 /-!
 # One `Data` argument, real `ScriptContext`-shaped
@@ -167,22 +168,16 @@ def mkScriptContext (message : String) (signatories : List String)
 /-! ## Typed backend: `isHonestScriptContext` through `Poe.TranslateTplc`
 
 The same flagship validator, this time compiled via the *typed* backend
-and checked directly against `plc` (not yet an automated in-Lean oracle
-like `Poe.Oracle`'s own `uplc`-shelling harness — these three `Data`
-constants were hand-fed to `plc typecheck`/`evaluate` on the command
-line). Getting here required two real translator fixes, both found by
-this exact test failing first: `Bool`/`Unit` *construction* (not just
-`.cases` branching on them) wasn't special-cased at all, and
-`Decidable.decide (p : Prop) [h : Decidable p] : Bool` — reached via
-`Int`'s `==`, not `<` — has a `Prop`-*sorted* parameter `p` that
-`isTypeFormerType` alone misclassifies as a real `tyAbs` binder, even
-though call sites pass it as `Arg.erased` (an arity mismatch that
-mistranslated `==`-based comparisons specifically, `<`-based ones like
-`absInt`'s were already fine). `isHonestScriptContext` translates to a
-term that type-checks as `(fun (con data) (con bool))`, and evaluates
-correctly on all three of: the honest case (`True`), a same-shape
-wrong-signer case (`False`), and a wrong-purpose (minting, not
-spending) case (`False`). -/
+and checked through `Poe.TplcOracle` — the real `plc` executable, not a
+hand-copied transcript. Getting here required two real translator
+fixes, both found by this exact test failing first: `Bool`/`Unit`
+*construction* (not just `.cases` branching on them) wasn't
+special-cased at all, and `Decidable.decide (p : Prop) [h : Decidable
+p] : Bool` — reached via `Int`'s `==`, not `<` — has a `Prop`-*sorted*
+parameter `p` that `isTypeFormerType` alone misclassifies as a real
+`tyAbs` binder, even though call sites pass it as `Arg.erased` (an
+arity mismatch that mistranslated `==`-based comparisons specifically,
+`<`-based ones like `absInt`'s were already fine). -/
 
 open Poe.Uplc in
 def honestCtxDataTplc : Const :=
@@ -207,8 +202,19 @@ def mintingCtxDataTplc : Const :=
 
 #eval show Lean.CoreM Unit from do
   IO.println (Poe.EmitTplc.emit (← Poe.TranslateTplc.translate ``isHonestScriptContext))
-#eval Poe.EmitTplc.emit (.constant honestCtxDataTplc)
-#eval Poe.EmitTplc.emit (.constant wrongSignerCtxDataTplc)
-#eval Poe.EmitTplc.emit (.constant mintingCtxDataTplc)
+-- Expected values given directly rather than derived from a real
+-- `Poe.PlutusData.Data` value: `honestCtxDataTplc`/... are built from
+-- `Poe.Uplc.DataValue` (the untyped emitter's own hand-built test-data
+-- representation, same as `Poe.Oracle`'s own HelloWorld tests above),
+-- not a real `Data` round-trip, so there's no *actual Lean value* to
+-- compute here — the expectation is what the honest/dishonest scenario
+-- is constructed to mean, same as `Poe.Oracle.runSuite`/`runSuiteAborts`
+-- above already do for this exact function.
+#eval show Lean.CoreM Unit from
+  Poe.TplcOracle.runSuite ``isHonestScriptContext
+    [ ([.constant honestCtxDataTplc], .bool true)
+    , ([.constant wrongSignerCtxDataTplc], .bool false)
+    , ([.constant mintingCtxDataTplc], .bool false)
+    ]
 
 end Poe.Examples.HelloWorld

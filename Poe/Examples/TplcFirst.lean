@@ -1,6 +1,7 @@
 import Poe.Tplc
 import Poe.EmitTplc
 import Poe.TranslateTplc
+import Poe.TplcOracle
 import Poe.Examples.First
 
 /-!
@@ -79,11 +80,22 @@ directly against `plc` (not just eyeballed):
     monomorphizing it away. -/
 def genericId {α : Type} (x : α) : α := x
 
+-- `genericId` is genuinely polymorphic, so testing it through
+-- `Poe.TplcOracle` would need to apply a `TyInst` before any value
+-- argument — `evalDecl` only supports ordinary value application so
+-- far (no other fragment target needs polymorphic application yet).
+-- Its correctness is already pinned down structurally instead: it
+-- translates to *exactly* `tplcPolyIdentity` above, which *is*
+-- `plc`-verified.
 #eval show Lean.CoreM Unit from do
   IO.println (Poe.EmitTplc.emit (← Poe.TranslateTplc.translate ``genericId))
 
 #eval show Lean.CoreM Unit from do
   IO.println (Poe.EmitTplc.emit (← Poe.TranslateTplc.translate ``Poe.Examples.double))
+#eval show Lean.CoreM Unit from
+  Poe.TplcOracle.runSuite ``Poe.Examples.double
+    ((List.range 5).map fun n =>
+      ([Poe.TplcOracle.encodeInt (Int.ofNat n)], .integer (Poe.Examples.double (Int.ofNat n))))
 
 /-! `absInt` (also from `Poe.Examples.First`) is the first `Bool`-branching
     target: base LCNF's `if x < 0 then ...` turns out to be `cases` on
@@ -92,60 +104,72 @@ def genericId {α : Type} (x : α) : α := x
     the time `Poe.Translate` looks (confirmed directly by comparing
     `dumpMonoLCNF`/`Poe.TranslateTplc.dumpBaseLCNF` side by side), so this
     is a genuinely new case the untyped translator never had to handle.
-    The translated term was checked directly against `plc`: type-checks
-    as `(fun (con integer) (con integer))`, and evaluates correctly on
-    all three of `absInt (-5) = 5`, `absInt 0 = 0`, `absInt 7 = 7` — the
-    last two specifically to confirm the `ifThenElse` thunk encoding
-    (see `Poe.TranslateTplc`'s doc comment) picks the *correct* branch in
-    both directions, not just that *a* branch evaluates without error. -/
+    `Poe.TplcOracle.runSuite` below (not a hand-copied `plc` transcript
+    — the real oracle, checked against `absInt`'s own Lean value) covers
+    both signs, confirming the `ifThenElse` thunk encoding (see
+    `Poe.TranslateTplc`'s doc comment) picks the *correct* branch in both
+    directions, not just that *a* branch evaluates without error. -/
 #eval show Lean.CoreM Unit from do
   IO.println (Poe.EmitTplc.emit (← Poe.TranslateTplc.translate ``Poe.Examples.absInt))
+#eval show Lean.CoreM Unit from
+  Poe.TplcOracle.runSuite ``Poe.Examples.absInt
+    ([(-3 : Int), -1, 0, 1, 3].map fun n =>
+      ([Poe.TplcOracle.encodeInt n], .integer (Poe.Examples.absInt n)))
 
 /-! `divide` (also from `Poe.Examples.First`) exercises two more things at
     once: its `hy : y ≠ 0` proof parameter is dropped entirely (LCNF's
     `lcErased` type on that `Param`, filtered the same way
     `Poe.Translate.translateDecl` already had to), and its `poeError`
     branch (`Code.unreach`) becomes `Term.error`, both inside a
-    `Decidable`-branching `ifThenElse`. Checked directly against `plc`:
-    type-checks as `(fun (con integer) (fun (con integer) (con integer)))`
-    (exactly two params, confirming the proof really is gone from the
-    compiled arity), `divide 7 (-2)` evaluates to `-4` (floor division,
-    the same `divideInteger`/`Int.fdiv` correspondence `Poe.Translate`
-    already relies on), and `divide 7 0` genuinely aborts. -/
+    `Decidable`-branching `ifThenElse`. The oracle suite includes a
+    negative-divisor case (`7 / (-2) = -4`, floor division — the same
+    `divideInteger`/`Int.fdiv` correspondence `Poe.Translate` already
+    relies on) and a `runSuiteAborts` case confirming `divide 7 0`
+    genuinely aborts, not just "some branch happens to evaluate". -/
 #eval show Lean.CoreM Unit from do
   IO.println (Poe.EmitTplc.emit (← Poe.TranslateTplc.translate ``Poe.Examples.divide))
+#eval show Lean.CoreM Unit from
+  Poe.TplcOracle.runSuite ``Poe.Examples.divide
+    [ ([Poe.TplcOracle.encodeInt 7, Poe.TplcOracle.encodeInt (-2)],
+        .integer (Poe.Examples.divide 7 (-2) (by decide)))
+    , ([Poe.TplcOracle.encodeInt (-41), Poe.TplcOracle.encodeInt 5],
+        .integer (Poe.Examples.divide (-41) 5 (by decide)))
+    ]
+#eval show Lean.CoreM Unit from
+  Poe.TplcOracle.runSuiteAborts ``Poe.Examples.divide
+    [[Poe.TplcOracle.encodeInt 7, Poe.TplcOracle.encodeInt 0]]
 
 /-! `head` (also from `Poe.Examples.First`) is the first target needing
     `List`'s `cases`/`constr` support (`Poe.TranslateTplc.listPatFunctor`/
     `listTy`/`listUnrolledSop`, the isorecursive pattern-functor encoding
-    — see that file's doc comment). Checked directly against `plc`,
-    including constructing the *input* list via the same translator (not
-    a hand-built term): `testListTplc`/`emptyListTplc` below both
-    type-check as `List Int` (`ifix ...`), `head`'s own translated term
-    type-checks as `List Int -> Int`, `head testListTplc` evaluates to
-    `3`, and `head emptyListTplc` genuinely aborts. -/
-def testListTplc : List Int := [3, 99]
-def emptyListTplc : List Int := []
-
+    — see that file's doc comment). `Poe.TplcOracle.encodeIntList` builds
+    the input list through the *same* `iwrap`/`constr` encoding the
+    translator itself uses, so this is testing the real translator's
+    `List` handling on both the producer and consumer side, not a
+    hand-built shortcut. -/
 #eval show Lean.CoreM Unit from do
   IO.println (Poe.EmitTplc.emit (← Poe.TranslateTplc.translate ``Poe.Examples.head))
-#eval show Lean.CoreM Unit from do
-  IO.println (Poe.EmitTplc.emit (← Poe.TranslateTplc.translate ``testListTplc))
-#eval show Lean.CoreM Unit from do
-  IO.println (Poe.EmitTplc.emit (← Poe.TranslateTplc.translate ``emptyListTplc))
+#eval show Lean.CoreM Unit from
+  Poe.TplcOracle.runSuite ``Poe.Examples.head
+    [ ([Poe.TplcOracle.encodeIntList [3, 99]], .integer (Poe.Examples.head [3, 99] (by decide)))
+    , ([Poe.TplcOracle.encodeIntList [7]], .integer (Poe.Examples.head [7] (by decide)))
+    ]
+#eval show Lean.CoreM Unit from
+  Poe.TplcOracle.runSuiteAborts ``Poe.Examples.head [[Poe.TplcOracle.encodeIntList []]]
 
 /-! `sumList` (also from `Poe.Examples.First`) is the first genuinely
     *recursive* target — `Poe.TranslateTplc.typedFix`/`fixPat`/`fixArg`/
     `selfTy`, the isorecursive self-application fixpoint combinator (see
     that file's doc comment for the CBV-vs-call-by-name bug this design
-    caught along the way). Checked directly against `plc` (20s timeout
-    guards on both calls — after the earlier OOM incident, never run a
-    freshly hand/translator-built recursive term against `plc` without
-    one): the translated term type-checks as `List Int -> Int`,
-    `sumList testListTplc` evaluates to `102` (`3 + 99`), and
-    `sumList emptyListTplc` evaluates to `0` — the base case, confirming
-    the recursion actually terminates rather than merely not crashing. -/
+    caught along the way). The empty-list case is the one that actually
+    confirms the recursion *terminates* rather than merely not crashing
+    on the first call. -/
 #eval show Lean.CoreM Unit from do
   IO.println (Poe.EmitTplc.emit (← Poe.TranslateTplc.translate ``Poe.Examples.sumList))
+#eval show Lean.CoreM Unit from
+  Poe.TplcOracle.runSuite ``Poe.Examples.sumList
+    [ ([Poe.TplcOracle.encodeIntList [3, 99]], .integer (Poe.Examples.sumList [3, 99]))
+    , ([Poe.TplcOracle.encodeIntList []], .integer (Poe.Examples.sumList []))
+    ]
 
 end Poe.Examples

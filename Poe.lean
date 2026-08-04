@@ -6,6 +6,7 @@ import Poe.Prelude
 import Poe.PlutusData
 import Poe.Translate
 import Poe.TranslateTplc
+import Poe.TplcOracle
 import Poe.Oracle
 import Poe.Lint
 import Poe.Examples.First
