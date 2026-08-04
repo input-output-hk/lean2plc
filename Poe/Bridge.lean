@@ -168,4 +168,92 @@ theorem double_certificate :
    make this go away without restructuring the bridge to dodge it. -/
 #print axioms double_certificate
 
+/-!
+## Certificate 2: `absInt` (branching, still no partiality/recursion)
+
+The natural next step up from `double`: introduces real branching
+(`Decidable`/`ifThenElse`/`Force`/`Delay`) into the proof for the first
+time. `absIntUplcTerm` is `absInt`'s own already-`plc`/oracle-verified
+compiled shape (see `Poe.Examples.First`), hand-transcribed the same way
+`doubleUplcTerm` was.
+
+Unlike `double`, the two branches take a *different* number of CEK steps
+to reach `Halt` (the negation branch does one extra `SubtractInteger`) —
+found empirically, not assumed: 47 steps for the identity branch (`x ≥
+0`), 60 for the negation branch (`x < 0`). Since `runSteps` stays
+`Halt`ed once it gets there regardless of extra fuel, a single shared
+`n = 60` (the larger of the two) works for *every* `x`, sidestepping the
+need to pick a different `n` per branch.
+
+**Proved, not just stated** — but this one needed real fighting, worth
+recording: a `by_cases h : x < 0` split doesn't work at all, because
+`rfl` (kernel definitional equality) never consults local hypotheses —
+`h` sits inert in context while the kernel tries to reduce `x < 0`'s
+`Decidable` instance for a fully opaque `x` and gets stuck. The fix that
+actually works: `rcases x with n | n`, splitting on `Int`'s own two
+*constructors* (`ofNat`/`negSucc`) instead of the `Prop` `x < 0` — this
+makes `x` a genuine (still-symbolic-in-`n`) constructor application, not
+an opaque variable with an external fact about it, and `Int.negSucc_lt_zero`
+supplies the one remaining fact rfl-reduction can't derive on its own
+(that *any* `negSucc n` is negative). The `ofNat n` branch closes by bare
+`rfl`; the `negSucc n` branch needed each real builtin's own
+implementation (`ifThenElse`, `subtractInteger`, `expectedArgs`, ...)
+explicitly named in the `simp` set one at a time, following each "still
+stuck here" error — `PLC.lessThanInteger`/`PLC.subtractInteger`/etc. turned
+out to have the exact same "reduces via equation lemmas, not bare kernel
+whnf" property `toBlasterTerm` did for `double`, just several functions
+deep, chained through `evaluateBuiltinFunction`'s own dispatch. -/
+
+def absIntUplcTerm : Poe.Uplc.Term :=
+  .lam "x0"
+    (.app
+      (.lam "x1"
+        (.app
+          (.lam "x2"
+            (.app
+              (.lam "x3"
+                (.force
+                  (.app
+                    (.app
+                      (.app (.force (.builtin .ifThenElse)) (.var 0))
+                      (.delay
+                        (.app (.lam "x4" (.var 0))
+                          (.app (.app (.builtin .subtractInteger) (.const (.integer 0))) (.var 3)))))
+                    (.delay (.var 3)))))
+              (.app (.app (.builtin .lessThanInteger) (.var 2)) (.var 0))))
+          (.var 0)))
+      (.const (.integer 0)))
+
+def absIntProgram : Poe.Uplc.Program :=
+  .program (1, 1, 0) absIntUplcTerm
+
+theorem absInt_certificate :
+    ∀ (x : Int), ∃ (n : Nat),
+      PlutusCore.UPLC.CekMachine.cekExecuteProgram
+        (toBlasterProgram absIntProgram)
+        [Term.Term.Const (.Integer x)]
+        n
+      = PlutusCore.UPLC.CekMachine.State.Halt
+          (PlutusCore.UPLC.CekValue.CekValue.VCon (.Integer (Poe.Examples.absInt x))) := by
+  intro x
+  refine ⟨60, ?_⟩
+  simp only [toBlasterProgram, toBlasterTerm, toBlasterBuiltin, toBlasterConst, absIntProgram,
+    absIntUplcTerm, Poe.Examples.absInt, PlutusCore.UPLC.CekMachine.cekExecuteProgram,
+    PlutusCore.UPLC.CekMachine.cekExecuteProgramWithSemanticVariant,
+    PlutusCore.UPLC.CekMachine.applyParams, PlutusCore.UPLC.CekMachine.initialState]
+  rcases x with n | n
+  · rfl
+  · simp [Int.negSucc_lt_zero, PlutusCore.UPLC.CekMachine.runSteps, PlutusCore.UPLC.CekMachine.step,
+      PlutusCore.UPLC.CekMachine.evalBuiltin,
+      PlutusCore.UPLC.BuiltinFunctions.Evaluate.evaluateBuiltinFunction,
+      PlutusCore.UPLC.BuiltinFunctions.Integer.lessThanInteger, PlutusCore.Integer.lessThanInteger,
+      PlutusCore.UPLC.Builtins.expectedArgs, PlutusCore.UPLC.BuiltinFunctions.Bool.ifThenElse,
+      PlutusCore.Bool.ifThenElse, PlutusCore.UPLC.BuiltinFunctions.Integer.subtractInteger,
+      PlutusCore.Integer.subtractInteger, Int.sub]
+
+-- Same `sorryAx` taint as `double_certificate`, same reason (through
+-- `toBlasterConst`/`toBlasterTerm`, not a gap in *this* proof) — see
+-- that theorem's own note.
+#print axioms absInt_certificate
+
 end Poe.Bridge
