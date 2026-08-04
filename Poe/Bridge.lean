@@ -96,13 +96,15 @@ def toBlasterProgram : Poe.Uplc.Program → Term.Program
   | .program (a, b, c) t => .Program (.Version a b c) (toBlasterTerm t)
 
 /-!
-## D5 (stretch): certificate theorem shape, stated for `double`
+## D5 (stretch): certificate theorem, proved for `double`
 
 `PlutusCore.UPLC.CekMachine.cekExecuteProgram : Program → List Term → Nat
-→ State` is fuel-limited (`Nat` steps), returning `Eval`/`Return` if fuel
-runs out, `Halt value` on success, `Error` on a genuine crash — so the
-natural certificate shape is existential over fuel: for every input,
-*some* amount of stepping reaches the halted state matching the source
+→ State` is fuel-limited (`Nat` steps) via `runSteps`, which (checked
+directly, not assumed) treats fuel exhaustion *before* halting as
+`State.Error` too — `Eval`/`Return` states never escape `runSteps` itself
+— so `Halt`/`Error` are the only two possible results, and the natural
+certificate shape is existential over fuel: for every input, *some*
+amount of stepping reaches the halted state matching the source
 function's real Lean value.
 
 `doubleUplcTerm` is `double`'s already-`plc`/oracle-verified compiled
@@ -111,10 +113,17 @@ threaded through `Poe.Translate.translate` (a `CoreM` metaprogramming
 action, not plain data a `theorem` statement can reference directly) —
 matching the same "hand-built term, checked to match the real
 translator's output" methodology `Poe.Examples.First`'s own opening
-section already uses. Stated, not proved (`sorry`), per D5's own
-"state, don't necessarily prove" — the point of this exercise is to see
-how much encoding pain the statement itself involves, not to discharge
-it. -/
+section already uses.
+
+**Actually proved**, not just stated (D5's own bar was only "state, not
+necessarily prove" — this clears it): traced by hand and cross-checked
+against `#eval`, 15 CEK steps exactly reach `Halt` for any input
+(`AddInteger`'s own evaluation never branches on its operands' specific
+values, so the same fixed step count works for every `x`, not just the
+ones tried) — and, found empirically rather than assumed, plain `rfl`
+discharges the whole thing: the kernel unfolds `toBlasterTerm`/
+`toBlasterBuiltin`/`step`/`runSteps`/... symbolically for the free `x`
+without ever needing to know its concrete value. -/
 
 def doubleUplcTerm : Poe.Uplc.Term :=
   .lam "x" (.app (.app (.builtin .addInteger) (.var 0)) (.var 0))
@@ -130,6 +139,33 @@ theorem double_certificate :
         n
       = PlutusCore.UPLC.CekMachine.State.Halt
           (PlutusCore.UPLC.CekValue.CekValue.VCon (.Integer (Poe.Examples.double x))) := by
-  sorry
+  intro x
+  refine ⟨15, ?_⟩
+  -- `toBlasterTerm`/`toBlasterProgram` don't reduce via bare `rfl`
+  -- (found empirically, not assumed) — their auto-generated equation
+  -- lemmas unfold them fine, and the CEK machine's own internals
+  -- (`step`/`runSteps`/...) *do* reduce via plain `rfl` once that's
+  -- done (confirmed separately against a hand-built Blaster term
+  -- bypassing the bridge entirely).
+  simp only [toBlasterProgram, toBlasterTerm, toBlasterBuiltin, doubleProgram, doubleUplcTerm,
+    Poe.Examples.double]
+  rfl
+
+/- `#print axioms` reports `sorryAx` here — worth being exact about why,
+   rather than either hiding it or overclaiming a gap in *this* proof.
+   `doubleUplcTerm` has no `.const` node at all, so `toBlasterTerm`'s
+   reduction on it never touches the `.const c => .Const (toBlasterConst
+   c)` branch, and the certificate above is genuinely, fully proved for
+   `double` — confirmed directly: `toBlasterTerm` itself (just the plain
+   function, no theorem involved) already reports `sorryAx` via `#print
+   axioms`, since it's one *general* function over all of `Poe.Uplc.Term`
+   and one of its branches calls `toBlasterConst`, which has real
+   `sorry`s for `bytestring`/`data`. Lean's axiom tracking is
+   per-declaration, not per-execution-path: mentioning a sorry'd
+   function at all taints the whole definition, regardless of whether a
+   specific input's reduction ever reaches that branch. Only resolving
+   the real `ByteArray`/`ByteString` gap (see file doc comment) would
+   make this go away without restructuring the bridge to dodge it. -/
+#print axioms double_certificate
 
 end Poe.Bridge
