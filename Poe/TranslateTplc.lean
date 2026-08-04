@@ -172,6 +172,39 @@ def listUnrolledSop (elemTy : Tplc.Ty) : Tplc.Ty :=
   .sop [[], [elemTy, listTy elemTy]]
 
 /-!
+## `Data`-record accessors: `constrTag`/`field0`–`field8`
+
+Real Plutus Core's *native* `pair`/`list` builtin types (a completely
+different representation from `listTy`'s user-level SOP encoding, see
+`Poe.Tplc.TyBuiltin`'s doc comment) — `unConstrData : data -> pair
+integer (list data)` (monomorphic, confirmed directly against both
+`PlutusCore/Default/Builtins.hs`'s Haskell signature and `plc
+typecheck`), `fstPair`/`sndPair : all a b. pair a b -> a`/`-> b`,
+`headList`/`tailList : all a. list a -> a`/`-> list a` (both genuinely
+polymorphic, each instantiation confirmed directly against `plc`).
+Mirrors `Poe.Translate`'s own `fstPair`/`sndPair`/`headList`/`tailList`
+chains exactly, just with the extra `TyInst`s real typed builtins need
+that untyped UPLC's `force` doesn't distinguish.
+-/
+
+def dataFieldsTy : Tplc.Ty := .app (.builtin .list) (.builtin .data)
+
+def constrTagTerm (blob : Tplc.Term) : Tplc.Term :=
+  .apply (.tyInst (.tyInst (.builtin .fstPair) (.builtin .integer)) dataFieldsTy)
+    (.apply (.builtin .unConstrData) blob)
+
+def fieldsOfTerm (blob : Tplc.Term) : Tplc.Term :=
+  .apply (.tyInst (.tyInst (.builtin .sndPair) (.builtin .integer)) dataFieldsTy)
+    (.apply (.builtin .unConstrData) blob)
+
+def applyTailListN : Nat → Tplc.Term → Tplc.Term
+  | 0, t => t
+  | n + 1, t => applyTailListN n (.apply (.tyInst (.builtin .tailList) (.builtin .data)) t)
+
+def fieldAtTerm (n : Nat) (blob : Tplc.Term) : Tplc.Term :=
+  .apply (.tyInst (.builtin .headList) (.builtin .data)) (applyTailListN n (fieldsOfTerm blob))
+
+/-!
 ## Recursion: the typed isorecursive fixpoint combinator
 
 `Poe.Translate`'s untyped self-application `x x` (the Z-combinator) is
@@ -232,6 +265,46 @@ def typedFix (t argTy : Tplc.Ty) : Tplc.Term :=
           (.apply (.apply (.unwrap (.var 1)) (.var 1)) (.var 0))))
   .lamAbs (.fn t t) (.apply selfApp (.iwrap fixPat (fixArg t) selfApp))
 
+/-!
+## `decodeByteStringList`: a bespoke native-list-decode intrinsic
+
+Same role as `Poe.Translate.decodeByteStringListTerm` (both are
+special-cased by name in `translateConstCall`, not translated from
+`Poe.PlutusData.decodeByteStringList`'s own placeholder Lean body) — but
+here `Term.case`'s native support for scrutinizing a *builtin* `list`
+directly (confirmed against the real type-checker's own
+`annotateCaseBuiltin`/`caseBuiltin` instances in
+`PlutusCore/Default/Universe.hs`, and independently against `plc`) means
+no `headList`/`tailList`/`nullList` loop is needed at all — just a
+`Case` with branches in `[cons, nil]` order (cons a 2-argument lambda,
+nil a bare term), the exact same convention `Poe.Translate`'s own
+native-list `case` already uses. -/
+
+def nativeListOfDataTy : Tplc.Ty := .app (.builtin .list) (.builtin .data)
+
+/-- Body of `λself. λlst. case lst [consBranch, nilBranch]`, building an
+    ordinary SoP-`constr`/`IWrap`-encoded `List elemTy` as it goes (so
+    everything downstream of this one primitive is back in the regular
+    fragment) — `self`/`lst` at depth 2 (self index 1, lst index 0);
+    inside the cons branch, two more binders shift everything already
+    bound by 2 (h index 1, t index 0, self now index 3). -/
+def dataListLoopBody (elemTy : Tplc.Ty) : Tplc.Term :=
+  let consBranch :=
+    Tplc.Term.lamAbs (.builtin .data) (.lamAbs nativeListOfDataTy
+      (.iwrap listPatFunctor elemTy
+        (.constr (listUnrolledSop elemTy) 1
+          [.apply (.builtin .unBData) (.var 1), .apply (.var 3) (.var 0)])))
+  let nilBranch := Tplc.Term.iwrap listPatFunctor elemTy (.constr (listUnrolledSop elemTy) 0 [])
+  .case (listTy elemTy) (.var 0) [consBranch, nilBranch]
+
+/-- `λd. (fix loop) (unListData d)`. -/
+def decodeByteStringListTerm : Tplc.Term :=
+  let bsTy := Tplc.Ty.builtin .bytestring
+  let t := Tplc.Ty.fn nativeListOfDataTy (listTy bsTy)
+  let loopF := Tplc.Term.lamAbs t (.lamAbs nativeListOfDataTy (dataListLoopBody bsTy))
+  .lamAbs (.builtin .data)
+    (.apply (.apply (typedFix t nativeListOfDataTy) loopF) (.apply (.builtin .unListData) (.var 0)))
+
 /-- A type-former `Param`'s own type is bound directly (`Ty.var`, via
     `Ctx.lookupTy`); a concrete base type comes from `builtinTyTable`;
     `List α` recurses into `listTy` — no other user-defined
@@ -287,6 +360,15 @@ def applyArgsTplc (ctx : Ctx) (f : Tplc.Term) (args : Array Arg) : CoreM Tplc.Te
     | .fvar fvarId => return .apply acc (.var (← ctx.lookupTerm fvarId))
     | .type e => return .tyInst acc (← translateTy ctx e)
 
+/-- A single value argument, `Poe.Translate.translateArg`'s typed
+    counterpart — used by the `Data`-accessor special cases below, which
+    (unlike `applyArgsTplc`) build a bespoke term around their one
+    argument rather than a plain `Term.apply` chain. -/
+def translateArgTplc (ctx : Ctx) : Arg → CoreM Tplc.Term
+  | .fvar fvarId => return .var (← ctx.lookupTerm fvarId)
+  | .erased | .type _ =>
+    throwError "translateTplc: erased/type argument reached a Data accessor (out of fragment)"
+
 /-- `Code.let`/`LetValue.const` self-references detect recursion, same
     definition as `Poe.Translate.codeMentionsSelf` (duplicated rather than
     shared since the two translators are expected to diverge further as
@@ -324,6 +406,29 @@ partial def translateConstCall (ctx : Ctx) (declName : Name) (args : Array Arg) 
   -- `abort`'s Lean type is the concrete `Unit → Unit`, never instantiated
   -- at any other type, so its own result `Ty` needs no lookup at all.
   | ``Poe.Prelude.abort, _ => return .error (.builtin .unit)
+  -- `Bool`/`Unit` are the *builtin* constants everywhere (matching
+  -- `translateTy`'s own `Decidable`-collapses-to-`bool` reasoning and
+  -- `.cases`'s Bool/Decidable handling), not SOP `constr` values like
+  -- `List` — same special-casing `Poe.Translate.translateConstCall`
+  -- already needs for exactly the same reason (a `true`/`false`/`()`
+  -- literal reaches here as an ordinary 0-arg constructor application,
+  -- not through `.cases` at all).
+  | ``Bool.false, #[] => return .constant (.bool false)
+  | ``Bool.true, #[] => return .constant (.bool true)
+  | ``PUnit.unit, #[] => return .constant .unit
+  -- `Poe.PlutusData`'s accessors are opaque/self-recursive placeholder
+  -- bodies (e.g. `field0 d := field0 d`) never meant to be translated
+  -- literally — special-cased by name exactly like
+  -- `Poe.Translate.translateConstCall` already has to, or the typed
+  -- translator would (now that recursion is wired in) happily compile
+  -- the placeholder body into a well-typed term that loops forever.
+  | ``Poe.PlutusData.constrTag, #[a] => return constrTagTerm (← translateArgTplc ctx a)
+  | ``Poe.PlutusData.field0, #[a] => return fieldAtTerm 0 (← translateArgTplc ctx a)
+  | ``Poe.PlutusData.field1, #[a] => return fieldAtTerm 1 (← translateArgTplc ctx a)
+  | ``Poe.PlutusData.field2, #[a] => return fieldAtTerm 2 (← translateArgTplc ctx a)
+  | ``Poe.PlutusData.field8, #[a] => return fieldAtTerm 8 (← translateArgTplc ctx a)
+  | ``Poe.PlutusData.decodeByteStringList, #[a] =>
+    return .apply decodeByteStringListTerm (← translateArgTplc ctx a)
   | _, _ =>
     if let some (.ctorInfo info) := (← getEnv).find? declName then
       -- Only `List`'s two constructors, for now (see file doc comment) —
@@ -459,8 +564,18 @@ partial def translateDecl (decl : Decl) : CoreM Tplc.Term := do
   -- every call site (same necessity `Poe.Translate.translateDecl`'s own
   -- identical filter documents: without it, a param whose type is
   -- `lcErased` itself would reach `translateTy` and fail outright, since
-  -- `lcErased` isn't a real `Ty`).
-  let params := decl.params.filter fun p => !p.type.isErased
+  -- `lcErased` isn't a real `Ty`). *Also* drop params whose type is
+  -- itself `Prop`/`A → Prop` (`isPropFormerTypeQuick`) — a genuinely new
+  -- case base phase needs that mono phase never surfaces: confirmed
+  -- directly by dumping `Decidable.decide (p : Prop) [h : Decidable p]`,
+  -- where `p`'s own type *is* `Sort 0`, so `isTypeFormerType` alone
+  -- would (wrongly) treat it as a real `tyAbs` binder — but call sites
+  -- pass `p` as `Arg.erased`, not `Arg.type` (Props carry no runtime
+  -- content, unlike a genuine `Type`-sorted argument), so an unfiltered
+  -- `p` produces a decl/call-site arity mismatch (an extra leading
+  -- `tyAbs` no caller ever instantiates).
+  let params := decl.params.filter fun p =>
+    !p.type.isErased && !Compiler.LCNF.isPropFormerTypeQuick p.type
   if codeMentionsSelf decl.name code then
     if params.any fun p => Compiler.LCNF.isTypeFormerType p.type then
       throwError "translateTplc: {decl.name} is a generic recursive decl — not yet supported (fixArg would need to embed T under a fresh binder with reshifting; see file doc comment)"

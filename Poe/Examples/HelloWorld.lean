@@ -3,6 +3,8 @@ import Poe.Oracle
 import Poe.Prelude
 import Poe.PlutusData
 import Poe.Examples.DataDecoding
+import Poe.TranslateTplc
+import Poe.EmitTplc
 
 /-!
 # One `Data` argument, real `ScriptContext`-shaped
@@ -161,5 +163,52 @@ def mkScriptContext (message : String) (signatories : List String)
     , [mkScriptContext "Hello, World!" signers (mkSpendingScriptInfo "mallory")]
     , [mkScriptContext "wrong message" signers (mkSpendingScriptInfo "alice")]
     ]
+
+/-! ## Typed backend: `isHonestScriptContext` through `Poe.TranslateTplc`
+
+The same flagship validator, this time compiled via the *typed* backend
+and checked directly against `plc` (not yet an automated in-Lean oracle
+like `Poe.Oracle`'s own `uplc`-shelling harness — these three `Data`
+constants were hand-fed to `plc typecheck`/`evaluate` on the command
+line). Getting here required two real translator fixes, both found by
+this exact test failing first: `Bool`/`Unit` *construction* (not just
+`.cases` branching on them) wasn't special-cased at all, and
+`Decidable.decide (p : Prop) [h : Decidable p] : Bool` — reached via
+`Int`'s `==`, not `<` — has a `Prop`-*sorted* parameter `p` that
+`isTypeFormerType` alone misclassifies as a real `tyAbs` binder, even
+though call sites pass it as `Arg.erased` (an arity mismatch that
+mistranslated `==`-based comparisons specifically, `<`-based ones like
+`absInt`'s were already fine). `isHonestScriptContext` translates to a
+term that type-checks as `(fun (con data) (con bool))`, and evaluates
+correctly on all three of: the honest case (`True`), a same-shape
+wrong-signer case (`False`), and a wrong-purpose (minting, not
+spending) case (`False`). -/
+
+open Poe.Uplc in
+def honestCtxDataTplc : Const :=
+  .data (.constr 0
+    [ mkTxInfo ["bob", "alice", "carol"]
+    , .constr 0 [dataStr "Hello, World!"]
+    , mkSpendingScriptInfo "alice" ])
+
+open Poe.Uplc in
+def wrongSignerCtxDataTplc : Const :=
+  .data (.constr 0
+    [ mkTxInfo ["bob", "alice", "carol"]
+    , .constr 0 [dataStr "Hello, World!"]
+    , mkSpendingScriptInfo "mallory" ])
+
+open Poe.Uplc in
+def mintingCtxDataTplc : Const :=
+  .data (.constr 0
+    [ mkTxInfo ["bob", "alice", "carol"]
+    , .constr 0 [dataStr "Hello, World!"]
+    , mkMintingScriptInfo ])
+
+#eval show Lean.CoreM Unit from do
+  IO.println (Poe.EmitTplc.emit (← Poe.TranslateTplc.translate ``isHonestScriptContext))
+#eval Poe.EmitTplc.emit (.constant honestCtxDataTplc)
+#eval Poe.EmitTplc.emit (.constant wrongSignerCtxDataTplc)
+#eval Poe.EmitTplc.emit (.constant mintingCtxDataTplc)
 
 end Poe.Examples.HelloWorld

@@ -37,6 +37,8 @@ def emitTyBuiltin : TyBuiltin → String
   | .bool       => "bool"
   | .unit       => "unit"
   | .data       => "data"
+  | .list       => "list"
+  | .pair       => "pair"
 
 /-- `depth` = number of enclosing *type*-level binders (`Ty.forall_`,
     `Ty.lam`, or an enclosing `Term.tyAbs`) — a completely separate

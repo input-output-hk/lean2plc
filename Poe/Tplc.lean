@@ -37,7 +37,16 @@ deriving Repr, BEq
     real source parameterizes this over a whole builtin-type universe
     (`SomeTypeIn uni`); Poe only ever needs the handful `Poe.Uplc.Const`
     already covers, so this mirrors that enum directly rather than the
-    full universe machinery. -/
+    full universe machinery. `list`/`pair` are higher-kinded (`* -> *`/
+    `* -> * -> *`) *type formers*, applied via ordinary `Ty.app` — not
+    baked-in compound types — confirmed directly against `plc`:
+    `(con (list integer) ...)`'s own inferred type prints as
+    `[(con list) (con integer)]`, i.e. `(con list)` (kind `* -> *`)
+    applied to `(con integer)`, not a single `TyBuiltin` case parameterized
+    by its element type. This is Plutus Core's *native* list/pair (what
+    `unConstrData`/`fstPair`/`headList`/... actually operate on) — a
+    completely different representation from `listTy`'s user-level SOP
+    encoding in `Poe.TranslateTplc`, despite both being called "list". -/
 inductive TyBuiltin
   | integer
   | bytestring
@@ -45,6 +54,8 @@ inductive TyBuiltin
   | bool
   | unit
   | data
+  | list
+  | pair
 deriving Repr, BEq
 
 /-- `TyVar i` is a de Bruijn index into the *type-level* binder stack —
