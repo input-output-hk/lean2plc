@@ -319,4 +319,133 @@ theorem vHead_certificate (n : Nat) (v : {l : List Int // l.length = n + 1}) :
 
 #print axioms vHead_certificate
 
+/-!
+## A real inductive `Vec`, not the subtype encoding
+
+Testing empirically, not assuming: does Poe's existing generic
+`cases`/`constr` compilation already handle an ordinary two-constructor
+user inductive, or does it need `List`-specific special-casing the way
+`Data`'s accessors do (those need it because they map to real UPLC
+*builtins*; an inductive with no builtin behind it might not)? -/
+
+inductive Vec (X : Type) : Nat → Type
+  | nil : Vec X 0
+  | cons {n : Nat} : X → Vec X n → Vec X (n + 1)
+
+def vecHead {X : Type} {n : Nat} : Vec X (n + 1) → X
+  | .cons x _ => x
+
+#eval Poe.Translate.dumpMonoLCNF ``vecHead
+#eval Poe.Lint.check ``vecHead
+
+#eval show Lean.CoreM Unit from do
+  let t ← Poe.Translate.translate ``vecHead
+  IO.println (Poe.Emit.emit t)
+
+/-!
+## A concrete shot at "no junk" — the paper's own aside, made real
+
+Wadler's paper notes, in passing, that in a model supporting fixpoints,
+⊥ inhabits the Church-encoded naturals without being a genuine one. Poe
+doesn't use Church encoding (see the earlier discussion — real Plutus V3
+has native `constr`/`case`, so Poe's own `Nat` would just be `constr 0
+[]`/`constr 1 [n]`, dispatched natively, not a lambda-encoding at all).
+This section builds the concrete, hands-on version: a genuine numeral
+that halts to the expected value, and a "junk" term — Ω, the standard
+non-terminating self-application combinator, `(λx.xx)(λx.xx)` — that
+diverges, proved (not just observed) by exhibiting its exact CEK cycle. -/
+
+/-- Built directly as a Blaster `Term.Term`, bypassing `toBlasterTerm`
+    entirely — `omega` has no `.const` node at all, so it doesn't need
+    the bridge, and building it directly sidesteps the `sorryAx` taint
+    `toBlasterTerm`/`toBlasterConst` carry (from the unrelated
+    `ByteArray`/`Data` gap), which blocks `#eval` outright regardless of
+    whether a given execution path would ever touch it. -/
+def omegaBlaster : Term.Term :=
+  .Apply (.Lam "x" (.Apply (.Var 0) (.Var 0))) (.Lam "x" (.Apply (.Var 0) (.Var 0)))
+
+#eval show Lean.CoreM Unit from do
+  for n in List.range 12 do
+    IO.println s!"n={n}: {repr (iterate default (State.Eval [] [] omegaBlaster) n)}"
+
+/-- The state reached after 5 steps — confirmed by the trace above, not
+    guessed: `n=5` and `n=10` print identically, i.e. Ω enters a genuine
+    period-5 cycle after an initial 5-step transient. -/
+def omegaVLam : CekValue := .VLam "x" (.Apply (.Var 0) (.Var 0)) []
+def omegaSigma5 : State := .Eval [] [omegaVLam] (.Apply (.Var 0) (.Var 0))
+
+theorem omega_reaches_sigma5 :
+    iterate default (State.Eval [] [] omegaBlaster) 5 = omegaSigma5 := by
+  simp [iterate, step, omegaBlaster, omegaSigma5, omegaVLam]
+
+theorem omega_sigma5_period :
+    iterate default omegaSigma5 5 = omegaSigma5 := by
+  simp [iterate, step, omegaSigma5, omegaVLam]
+
+/-- The genuine non-termination proof: not "we tried some fuel values
+    and it didn't halt", but *for every* `n`, it doesn't halt — by strong
+    induction, using the period-5 cycle to reduce any `n ≥ 5` to a
+    strictly smaller case. -/
+theorem omega_sigma5_never_halts (n : Nat) (V : CekValue) :
+    iterate default omegaSigma5 n ≠ State.Halt V := by
+  induction n using Nat.strongRecOn with
+  | ind n ih =>
+    match n with
+    | 0 => simp [iterate, omegaSigma5]
+    | 1 => simp [iterate, step, omegaSigma5]
+    | 2 => simp [iterate, step, omegaSigma5]
+    | 3 => simp [iterate, step, omegaSigma5]
+    | 4 => simp [iterate, step, omegaSigma5]
+    | (m + 5) =>
+      have h : iterate default omegaSigma5 (m + 5) = iterate default omegaSigma5 m := by
+        rw [show m + 5 = 5 + m from by omega, iterate_add, omega_sigma5_period]
+      rw [h]
+      exact ih m (by omega)
+
+/-- The paper's aside, made concrete: Ω is a genuine `Poe.Uplc.Term` —
+    syntactically well-formed, exactly the shape a native `constr 1 [n]`
+    consumer would be handed if fed junk instead of a real numeral — and
+    it provably never reaches `Halt`, for *any* amount of fuel. This is
+    the hands-on version of "a model with fixpoints admits non-genuine
+    inhabitants" — not asserted, proved. -/
+theorem omega_never_halts (n : Nat) (V : CekValue) :
+    iterate default (State.Eval [] [] omegaBlaster) n ≠ State.Halt V := by
+  rcases Nat.lt_or_ge n 5 with hn | hn
+  · match n, hn with
+    | 0, _ => simp [iterate, omegaBlaster]
+    | 1, _ => simp [iterate, step, omegaBlaster]
+    | 2, _ => simp [iterate, step, omegaBlaster]
+    | 3, _ => simp [iterate, step, omegaBlaster]
+    | 4, _ => simp [iterate, step, omegaBlaster]
+  · have h : iterate default (State.Eval [] [] omegaBlaster) (5 + (n - 5))
+        = iterate default omegaSigma5 (n - 5) := by
+      rw [iterate_add, omega_reaches_sigma5]
+    have hn5 : (5 + (n - 5) : Nat) = n := by omega
+    rw [hn5] at h
+    rw [h]
+    exact omega_sigma5_never_halts (n - 5) V
+
+#print axioms omega_never_halts
+
+/-!
+## The other half of the contrast: a genuine numeral halts
+
+Poe's real, native `Nat` (if it had one) would just be `constr 0 []`
+(zero) / `constr 1 [n]` (succ n) — the same tagged-sum mechanism already
+used for `List`/`Vec` all session, dispatched via native `case`, no
+lambda-encoding involved. `two` below is exactly that, and — unlike
+Ω, offered the same kind of consumer — halts to exactly the expected
+nested value. -/
+
+def natZeroBlaster : Term.Term := .Constr 0 []
+def natSuccBlaster (n : Term.Term) : Term.Term := .Constr 1 [n]
+def twoBlaster : Term.Term := natSuccBlaster (natSuccBlaster natZeroBlaster)
+def twoValue : CekValue := .VConstr 1 [.VConstr 1 [.VConstr 0 []]]
+
+theorem two_halts :
+    runSteps default (State.Eval [] [] twoBlaster) 6 = State.Halt twoValue := by
+  simp [runSteps, step, twoBlaster, natSuccBlaster, natZeroBlaster, twoValue]
+
+#print axioms two_halts
+
 end Poe.Examples.VecScratch
