@@ -141,4 +141,52 @@ theorem genericId_self_related :
 
 #print axioms genericId_self_related
 
+/-!
+## The genuinely binary case — two *different* closures
+
+Everything above only ever related a value to *itself*. Real doubling
+(Fig. 5) is about relating two different implementations. `genericIdValue2`
+below is the "let-wrapped" identity, `λx. (λy.y) x` — exactly the extra
+identity-continuation wrapper `Poe.Translate.translateCode`'s `.let` case
+always emits (the same wrapper shape whose omission was the real bug
+`double_certificate` had to be fixed for, earlier this session).
+Syntactically a different term from plain `λx.x`; behaviorally identical.
+This is the first proof this file needed that isn't a disguised
+self-relation. -/
+
+def genericIdValue2 : CekValue :=
+  .VDelay (Term.Term.Lam "x"
+    (Term.Term.Apply (Term.Term.Lam "y" (Term.Term.Var 0)) (Term.Term.Var 0))) []
+
+theorem force_genericId2 :
+    iterate default (forceValue genericIdValue2) 3
+      = State.Halt (.VLam "x" (Term.Term.Apply (Term.Term.Lam "y" (Term.Term.Var 0))
+          (Term.Term.Var 0)) []) := by
+  simp [iterate, step, forceValue, genericIdValue2]
+
+theorem applyValue_id2 (v : CekValue) :
+    iterate default
+        (applyValue (.VLam "x" (Term.Term.Apply (Term.Term.Lam "y" (Term.Term.Var 0))
+          (Term.Term.Var 0)) []) v) 10
+      = State.Halt v := by
+  simp [iterate, step, applyValue]
+
+/-- The real binary content: the plain identity and the let-wrapped
+    identity — two genuinely different compiled terms — are related at
+    `∀X. X→X`, for every choice of relation. This is what "doubling"
+    (Fig. 5) is actually for: not checking a term against itself, but
+    checking that two different implementations agree, up to the
+    relation, at every instantiation. -/
+theorem genericId_binary_related :
+    R (.forall_ .type (.fn (.var 0) (.var 0))) [] genericIdValue genericIdValue2 := by
+  intro R'
+  refine ⟨3, 3, .VLam "x" (Term.Term.Var 0) [],
+    .VLam "x" (Term.Term.Apply (Term.Term.Lam "y" (Term.Term.Var 0)) (Term.Term.Var 0)) [],
+    force_genericId, force_genericId2, ?_⟩
+  intro v w hvw
+  simp only [R, List.get?] at hvw ⊢
+  exact ⟨3, 10, v, w, applyValue_id v, applyValue_id2 w, hvw⟩
+
+#print axioms genericId_binary_related
+
 end Poe.Examples.RelScratch
