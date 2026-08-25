@@ -1,3 +1,5 @@
+import Lean
+
 /-!
 # Minimal UPLC AST
 
@@ -19,6 +21,10 @@ namespace Poe.Uplc
 instance : Repr ByteArray where
   reprPrec b n := reprPrec b.data n
 
+instance : Lean.ToExpr ByteArray where
+  toExpr b := Lean.mkApp (Lean.mkConst ``ByteArray.mk) (Lean.toExpr b.data)
+  toTypeExpr := Lean.mkConst ``ByteArray
+
 /-- Real Plutus Core `Data` has two more cases than this — `Map` *and* `I`
     (integer-as-`Data`, common on-chain for quantities/`POSIXTime`/indices) —
     corrected here after an independent review found this comment previously
@@ -34,7 +40,7 @@ inductive DataValue
   | b      : ByteArray → DataValue
   | list   : List DataValue → DataValue
   | constr : Nat → List DataValue → DataValue
-deriving Repr, BEq
+deriving Repr, BEq, Lean.ToExpr
 
 /-- A deliberate embedding of the sub-fragment of Blaster's real (larger)
     `Const` Poe needs — not a full isomorphism (see file doc comment). -/
@@ -45,7 +51,7 @@ inductive Const
   | bool       : Bool → Const
   | unit       : Const
   | data       : DataValue → Const
-deriving Repr, BEq
+deriving Repr, BEq, Lean.ToExpr
 
 inductive Builtin
   | addInteger
@@ -72,7 +78,7 @@ inductive Builtin
   | unConstrData
   | fstPair
   | sndPair
-deriving Repr, BEq
+deriving Repr, BEq, Lean.ToExpr
 
 /-- `Var i` is a de Bruijn index: 0 = innermost enclosing `lam`.
     The `String` on `lam` is display-only metadata. -/
@@ -87,9 +93,10 @@ inductive Term
   | constr  : Nat → List Term → Term
   | case    : Term → List Term → Term
   | error   : Term
-deriving Repr, BEq
+deriving Repr, BEq, Lean.ToExpr
 
 inductive Program
   | program : Nat × Nat × Nat → Term → Program
+deriving Repr, Lean.ToExpr
 
 end Poe.Uplc

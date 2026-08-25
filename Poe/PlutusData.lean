@@ -119,4 +119,52 @@ axiom field2_spec (tag : Nat) (f0 f1 f2 : Data) (rest : List Data) :
 axiom field8_spec (tag : Nat) (f0 f1 f2 f3 f4 f5 f6 f7 f8 : Data) (rest : List Data) :
     field8 (.constr tag (f0 :: f1 :: f2 :: f3 :: f4 :: f5 :: f6 :: f7 :: f8 :: rest)) = f8
 
+/-!
+## Shape-guarded accessors
+
+The `_spec` axioms above only ever fire when a proof already knows `d`'s
+*exact literal* shape (`isHonestScriptContext_correct` gets this for free
+because it universally quantifies over `mkCtxData`'s own construction).
+They say nothing at all — not "returns some field", not "the compiled
+program aborts" — about `field0 d` for a `d` whose shape isn't already
+pinned down that way, which is exactly the case a validator is actually
+in when navigating a nested, attacker-supplied `Redeemer`/`Datum`
+(`isHonestScriptContext`'s own `field1 redeemer`/`field0 (field0
+maybeDatum)` calls have no such proof available at all right now).
+
+`HasFieldAt` names the missing ghost precondition; `field0Safe` is
+*total*, given a proof of it — nothing new compiles, the proof argument
+erases and the emitted UPLC is the exact same `field0`/`unConstrData`
+chain as before (`Translate` still special-cases the name `field0`
+itself, reached through the wrapper's transparent body). What's gained is
+purely proof-side: one reusable precondition per accessor instead of a
+fresh literal-shape hypothesis manufactured at every call site, so a
+validator can be proved correct about a `d` whose shape is only known
+indirectly (derived from an earlier check), not just one built by a
+`mk...Data`-style test helper.
+
+The real payoff this sets up, not yet done: on real chain data nobody
+*has* a `HasFieldAt d n` proof for free — a caller either derives one
+from an earlier `Decidable`-checked shape test (and then knows
+`field0Safe` matches its spec), or has no such proof and must fall
+through to `Poe.Prelude.abort`/`poeError` instead of calling any
+accessor at all. That's the shape a validator's dishonest-input path
+*should* have, and currently doesn't for `isHonestScriptContext`'s nested
+fields — see its own module for the gap this closes. -/
+
+/-- Ghost-only (never computed on-chain, never appears in compiled code):
+    `d` really is a `Constr` application with a field at index `n`. -/
+def HasFieldAt (d : Data) (n : Nat) : Prop :=
+  ∃ tag fields, d = .constr tag fields ∧ n < fields.length
+
+def field0Safe (d : Data) (_ : HasFieldAt d 0) : Data := field0 d
+
+theorem field0Safe_spec {d : Data} {tag : Nat} {fields : List Data}
+    (heq : d = .constr tag fields) (hlt : 0 < fields.length) :
+    field0Safe d ⟨tag, fields, heq, hlt⟩ = fields[0] := by
+  subst heq
+  cases fields with
+  | nil => simp at hlt
+  | cons f0 rest => exact field0_spec tag f0 rest
+
 end Poe.PlutusData
