@@ -9,6 +9,12 @@ import Poe.Examples.TplcFirst
   let t ← Poe.TranslateTplc.translate ``Poe.Examples.genericId
   IO.println (repr t)
 
+def idList {α : Type} (xs : List α) : List α := xs
+
+#eval show Lean.CoreM Unit from do
+  let t ← Poe.TranslateTplc.translate ``idList
+  IO.println (repr t)
+
 /-!
 Scratch: a Fig.-4-style logical relation over `Poe.Tplc.Ty`, restricted
 to the arrow/forall core (`ifix` deferred — see the earlier discussion).
@@ -188,5 +194,68 @@ theorem genericId_binary_related :
   exact ⟨3, 10, v, w, applyValue_id v, applyValue_id2 w, hvw⟩
 
 #print axioms genericId_binary_related
+
+/-!
+## The `ifix` case, specialized to `List`
+
+Unfolding `μX.F` one level gives `F` with itself substituted back in —
+not structurally smaller than the original `ifix F A`, so plain
+recursion on `Ty` (what `R` above does) can't reach this case at all.
+The standard fix is *step-indexing*: recurse on a separately-decreasing
+`Nat` fuel count instead. Rather than handling arbitrary `F` (which would
+need a general type-level substitution/beta-reducer Poe doesn't have),
+this specializes directly to `List`'s own real pattern functor
+(`listPatFunctor` in `Poe.TranslateTplc`) — the concrete case that
+actually matters, the same scoping discipline used all session.
+`wrap`/`unwrap` erase to nothing at all (confirmed earlier against real
+Plutus's own erasure map), so no CEK step is needed to "enter" a list
+value — it's already just a plain `constr`-tagged value once erased. -/
+
+def Rk : Nat → Poe.Tplc.Ty → RelEnv → CekValue → CekValue → Prop
+  | 0, _, _, _, _ => True
+  | k + 1, .var i, ρ, v, w => (ρ.get? i).getD (fun _ _ => False) v w
+  | k + 1, .fn A B, ρ, f, g =>
+      ∀ v w, Rk k A ρ v w →
+        ∃ (n m : Nat) (f' g' : CekValue),
+          iterate default (applyValue f v) n = State.Halt f' ∧
+          iterate default (applyValue g w) m = State.Halt g' ∧
+          Rk k B ρ f' g'
+  | k + 1, .forall_ _kd B, ρ, f, g =>
+      ∀ (R' : CekValue → CekValue → Prop),
+        ∃ (n m : Nat) (f' g' : CekValue),
+          iterate default (forceValue f) n = State.Halt f' ∧
+          iterate default (forceValue g) m = State.Halt g' ∧
+          Rk k B (R' :: ρ) f' g'
+  | k + 1, .ifix F A, ρ, v, w =>
+      if F == Poe.TranslateTplc.listPatFunctor then
+        (v = .VConstr 0 [] ∧ w = .VConstr 0 []) ∨
+        (∃ v1 vt w1 wt, v = .VConstr 1 [v1, vt] ∧ w = .VConstr 1 [w1, wt] ∧
+          Rk k A ρ v1 w1 ∧ Rk k (.ifix F A) ρ vt wt)
+      else True
+  | k + 1, .builtin .integer, _, v, w => ∃ i, v = .VCon (.Integer i) ∧ w = .VCon (.Integer i)
+  | k + 1, .builtin _, _, v, w => v = w
+  | k + 1, .lam _ _, _, _, _ => True
+  | k + 1, .app _ _, _, _, _ => True
+  | k + 1, .sop _, _, _, _ => True
+
+#check @Rk
+
+/-- `idList`'s real TPLC term is `tyAbs Kind.type (lamAbs (ifix
+    listPatFunctor (var 0)) (Term.var 0))` — confirmed directly via
+    `Poe.TranslateTplc.translate` (see the `#eval` dump above): the same
+    body as `genericId`, only the argument's *type annotation* differs,
+    which erasure never looks at. So `idList` erases to the exact same
+    closure, `genericIdValue` — no new term needed, only a harder type
+    to check it against. -/
+theorem idList_self_related :
+    Rk 2 (.forall_ .type (.fn (Poe.TranslateTplc.listTy (.var 0))
+      (Poe.TranslateTplc.listTy (.var 0)))) [] genericIdValue genericIdValue := by
+  intro R'
+  refine ⟨3, 3, .VLam "x" (Term.Term.Var 0) [], .VLam "x" (Term.Term.Var 0) [],
+    force_genericId, force_genericId, ?_⟩
+  intro v w hvw
+  exact ⟨3, 3, v, w, applyValue_id v, applyValue_id w, hvw⟩
+
+#print axioms idList_self_related
 
 end Poe.Examples.RelScratch
