@@ -463,4 +463,15 @@ def vlength {X : Type} {n : Nat} (v : {l : List X // l.length = n}) : Nat := n
 
 #eval Poe.Translate.dumpMonoLCNF ``vlength
 
+/-- A *cheap* forcing example: `tag` is literally stored as `Data.constr`'s
+    own first field, so recovering it is a free O(1) projection — pattern-
+    match `d.1`'s outer constructor and read the field — not a real
+    recomputation the way `vlength`'s `List.length` traversal was. -/
+def isTaggedData (tag : Nat) (d : Poe.PlutusData.Data) : Prop :=
+  ∃ fields, d = .constr tag fields
+
+def getTag {tag : Nat} (d : {d : Poe.PlutusData.Data // isTaggedData tag d}) : Nat := tag
+
+#eval Poe.Translate.dumpMonoLCNF ``getTag
+
 end Poe.Examples.VecScratch
