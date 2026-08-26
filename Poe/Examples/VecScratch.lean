@@ -448,4 +448,19 @@ theorem two_halts :
 
 #print axioms two_halts
 
+/-!
+## A concrete McBride (forcing) example
+
+`vHead`'s index was dead in the body — erasable by the crudest possible
+argument (never read at all), no forcing needed. `vlength` is the
+minimal case where the index genuinely *is* used, so dead-code
+elimination alone doesn't apply, yet it's still fully recoverable from
+already-kept data (`v.1.length`), which is exactly what forcing (not
+Girard's dead-code case, not Kreisel, not Reynolds) is for. Checked
+empirically before claiming anything, same discipline as `vHead`. -/
+
+def vlength {X : Type} {n : Nat} (v : {l : List X // l.length = n}) : Nat := n
+
+#eval Poe.Translate.dumpMonoLCNF ``vlength
+
 end Poe.Examples.VecScratch
