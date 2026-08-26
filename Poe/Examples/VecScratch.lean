@@ -5,8 +5,8 @@ import Poe.Bridge
 
 /-!
 Scratch, not a permanent example: exploring what a "Girard-erasure of a
-dependent index" would look like for Poe, for the Wadler-workshop talk.
-Not wired into any translator, not a claim about what Poe supports today.
+dependent index" would look like for Poe. Not wired into any
+translator, not a claim about what Poe supports today.
 -/
 
 namespace Poe.Examples.VecScratch
