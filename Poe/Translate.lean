@@ -248,6 +248,14 @@ partial def translateConstCall (ctx : Ctx) (declName : Name) (args : Array Arg) 
   if let some (selfName, selfDepth) := ctx.self then
     if declName == selfName then
       return applyArgs (.var (ctx.depth - 1 - selfDepth)) (← translateArgs ctx args)
+  -- Ghost (`Prop`-typed) arguments — e.g. `Poe.PlutusData.field0`'s new
+  -- `HasFieldAt d 0` precondition, same idea as `divide`'s `y ≠ 0` — must
+  -- be dropped before the arity-based match below, the same as
+  -- `translateArgs` already does for ordinary calls; the special-cased
+  -- dispatch here matches on raw argument shape directly, so it needs its
+  -- own copy of that filtering or an erased trailing proof silently
+  -- breaks the `#[a]` arity match and falls through to the wrong case.
+  let args := args.filter fun | .fvar _ => true | .erased | .type _ => false
   match declName, args with
   | ``Int.ofNat, #[a] => translateArg ctx a
   | ``Int.neg, #[a] =>
@@ -305,8 +313,18 @@ partial def translateLetValue (ctx : Ctx) : LetValue → CoreM Uplc.Term
     a UPLC `case` over one branch per constructor, in declaration order,
     each wrapped in a lambda per constructor field (0 fields ⇒ no wrapping,
     per the `case` semantics of applying the branch to the fields).
-    Every constructor needs an explicit alternative — `default` alts
-    (unneeded by `sumList`) aren't handled yet. -/
+    A constructor missing its own explicit alternative falls back to the
+    `default` alt if there is one (Lean inserts these for "the other cases
+    are impossible" matches, e.g. `decodeSignatories`-style precondition-
+    carrying accessors) — a `default` alt binds none of the constructor's
+    fields (`Alt.getParams` is `#[]` for it), so its translated body is
+    reused unchanged, just wrapped in as many throwaway lambdas as that
+    constructor's *real* (non-erased) field count needs, for `case`'s
+    calling convention. Caveat: uses the constructor's raw `numFields`
+    (no per-field erasure info is available from a `default` alt), so this
+    is only correct today for constructors with zero erased fields —
+    true of every `Poe.PlutusData.Data` constructor, not yet handled in
+    general for constructors that mix erased and real fields. -/
 partial def translateCode (ctx : Ctx) : Code → CoreM Uplc.Term
   | .let decl k => do
     let v ← translateLetValue ctx decl.value
@@ -337,15 +355,23 @@ partial def translateCode (ctx : Ctx) : Code → CoreM Uplc.Term
       return .force (.app (.app (.app (.force (.builtin .ifThenElse)) discr) (.delay thenBranch)) (.delay elseBranch))
     else
       let branches ← (← ctorNames cases.typeName).toList.mapM fun ctorName => do
-        let some (.alt _ allParams code) := cases.alts.find? (fun | .alt n .. => n == ctorName | .default _ => false)
-          | throwError "translator: cases on {cases.typeName} missing an alternative for {ctorName} (default alts not yet handled)"
-        -- Same ghost-field dropping as `translateConstCall`'s constructor
-        -- case (which already only binds `.fvar` fields into a built
-        -- `constr`): a branch here must bind exactly the fields that value
-        -- was actually built with, or the arities disagree.
-        let params := allParams.filter fun p => !p.type.isErased
-        let branchBody ← translateCode (params.foldl (init := ctx) (·.bind ·.fvarId)) code
-        return params.foldr (init := branchBody) fun p acc => .lam p.binderName.toString acc
+        match cases.alts.find? (fun | .alt n .. => n == ctorName | .default _ => false) with
+        | some (.alt _ allParams code) =>
+          -- Same ghost-field dropping as `translateConstCall`'s constructor
+          -- case (which already only binds `.fvar` fields into a built
+          -- `constr`): a branch here must bind exactly the fields that
+          -- value was actually built with, or the arities disagree.
+          let params := allParams.filter fun p => !p.type.isErased
+          let branchBody ← translateCode (params.foldl (init := ctx) (·.bind ·.fvarId)) code
+          return params.foldr (init := branchBody) fun p acc => .lam p.binderName.toString acc
+        | _ =>
+          let some (.default code) := cases.alts.find? (fun | .default _ => true | _ => false)
+            | throwError "translator: cases on {cases.typeName} missing an alternative for {ctorName} (no default either)"
+          let some (.ctorInfo info) := (← getEnv).find? ctorName
+            | throwError "translator: {ctorName} is not a constructor"
+          let branchBody ← translateCode ctx code
+          return (List.range info.numFields).foldr (init := branchBody)
+            fun i acc => .lam s!"_default{i}" acc
       return .case discr branches
   | _ => throwError "translator: unsupported Code constructor (not yet handled)"
 

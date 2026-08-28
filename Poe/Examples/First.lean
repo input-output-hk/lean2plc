@@ -14,7 +14,7 @@ Four things:
 2. The first fragment programs the translator will be pointed at, with the
    ordinary-Lean ghost layer they should eventually carry.
 3. D0: check each is actually accepted by the fragment linter (see
-   `Poe.Examples.OutOfFragment` for the linter rejecting something).
+   `Poe.Experiments.OutOfFragment` for the linter rejecting something).
 4. D2: run each fragment program's translation through the real `uplc`
    oracle on generated inputs, checked against the actual Lean function
    (not a hand-copied expected value).
@@ -86,7 +86,7 @@ def divide (x y : Int) (hy : y ≠ 0) : Int :=
 #eval Poe.Translate.dumpMonoLCNF ``sumList
 
 /-! D0: fragment linter accepts all three (contrast with
-    `Poe.Examples.OutOfFragment`, which it rejects). -/
+    `Poe.Experiments.OutOfFragment`, which it rejects). -/
 #eval Poe.Lint.check ``double
 #eval Poe.Lint.check ``absInt
 #eval Poe.Lint.check ``sumList

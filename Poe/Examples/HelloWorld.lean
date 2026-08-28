@@ -1,220 +1,77 @@
 import Poe.Lint
-import Poe.Oracle
 import Poe.Prelude
 import Poe.PlutusData
-import Poe.Examples.DataDecoding
-import Poe.TranslateTplc
-import Poe.EmitTplc
-import Poe.TplcOracle
-
-/-!
-# One `Data` argument, real `ScriptContext`-shaped
-
-`Poe.Examples.AikenHelloWorld.validateHelloWorld` still takes three
-already-decoded `Data` arguments. A real Plutus V3 validator gets exactly
-one — the whole `ScriptContext` — and has to navigate down into it by
-hand. Verified against `plutus-ledger-api` source
-(`PlutusLedgerApi.V3.Contexts`), not assumed:
-
-  ScriptContext          = Constr 0 [txInfo, redeemer, scriptInfo]
-  TxInfo                 = Constr 0 [16 fields; txInfoSignatories is field 8]
-  ScriptInfo/SpendingScript = Constr 1 [txOutRef, Maybe Datum]   -- tag 1, confirmed
-  Maybe                   = Just: Constr 0 [x]; Nothing: Constr 1 []  -- NOT 0/1 the "obvious" way round
-  Datum, Redeemer (ours)  = Constr 0 [payload]                  -- the newtypes wrapping them are
-                                                                  transparent (`newtype Datum =
-                                                                  Datum BuiltinData`), no extra layer
-
-`TxInfo` here is trimmed to just the one field used (`txInfoSignatories`
-at its real index 8) with `I 0` placeholders elsewhere — the point is the
-*navigation*, not reproducing all 16 fields.
--/
+import Poe.Lib.DataDecoding
 
 namespace Poe.Examples.HelloWorld
 
-open Poe.PlutusData (Data unBData decodeByteStringList constrTag field0 field1 field2 field8)
-open Poe.Examples.DataDecoding (elemBytes elemBytes_iff ByteArray.beq_iff_eq)
+open Poe.PlutusData (Data decodeByteStringList IsByteStringList)
+open Poe.Lib.DataDecoding (elemBytes)
 
-/-- Aiken's `hello_world`, but from one real `ScriptContext`-shaped `Data`
-    argument instead of three pre-decoded ones: `false` unless this is a
-    `SpendingScript` invocation, `false` unless it actually has a datum,
-    then the same message + signer checks as before. Split out from
-    `validateScriptContext` (a plain `Bool`, not `Unit`) so there's
-    something a correctness theorem can actually say something about —
-    `Unit` has exactly one inhabitant, so any theorem of the shape
-    `validateScriptContext ctx = ()` would be vacuously true regardless of
-    what the function does (same reason `Poe.Examples.HelloWorldString`
-    proves things about `validate`, never `validateChecked`). -/
-def isHonestScriptContext (ctx : Data) : Bool :=
-  let txInfo := field0 ctx
-  let redeemer := field1 ctx
-  let scriptInfo := field2 ctx
-  let message := unBData (field0 redeemer)
-  let signatories := decodeByteStringList (field8 txInfo)
-  if constrTag scriptInfo == 1 then
-    let maybeDatum := field1 scriptInfo
-    if constrTag maybeDatum == 0 then
-      let owner := unBData (field0 (field0 maybeDatum))
-      message == "Hello, World!".toUTF8 && elemBytes owner signatories
-    else
-      false
-  else
-    false
+/-- `redeemer` really is `Constr _ [msg]` with `msg` a bytestring —
+    pattern-matched all the way to `.b`, so there's nothing left to
+    assert once the shape matches. -/
+def RedeemerOk (redeemer : Data) : Prop :=
+  match redeemer with
+  | .constr _ [.b _] => True
+  | _ => False
 
-def validateScriptContext (ctx : Data) : Unit :=
-  Poe.Prelude.check (isHonestScriptContext ctx)
+/-- The redeemer's message, given a proof its shape is honest. -/
+def decodeMessage : ∀ redeemer, RedeemerOk redeemer → ByteArray
+  | .constr _ [.b msgBytes], _ => msgBytes
 
-#eval Poe.Lint.check ``isHonestScriptContext
-#eval Poe.Lint.check ``validateScriptContext
+/-- `txInfo` really has 8 filler fields, then the signatories list, then
+    whatever real `TxInfo`'s other 7 fields are — pattern-matched down
+    to `sigListData` directly, `IsByteStringList` on it because a
+    variable-length list can't be pattern-matched any further (no finite
+    pattern says "however many elements, every one a bytestring"). -/
+def TxInfoOk (txInfo : Data) : Prop :=
+  match txInfo with
+  | .constr _ (_ :: _ :: _ :: _ :: _ :: _ :: _ :: _ :: sigListData :: _) =>
+      IsByteStringList sigListData
+  | _ => False
 
-/-! ## (a) An ordinary Lean correctness theorem about the source function
+/-- `txInfo`'s signatories, given a proof its shape is honest. -/
+def decodeSignatories : ∀ txInfo, TxInfoOk txInfo → List ByteArray
+  | .constr _ (_ :: _ :: _ :: _ :: _ :: _ :: _ :: _ :: sigListData :: _), h =>
+      decodeByteStringList sigListData h
 
-Conditional on the `_spec` axioms in `Poe.PlutusData` (the honest trust
-boundary documented there: what `Translate` emits is *claimed*, not
-proven here, to implement these primitives) — this is the same kind of
-theorem `Poe.Examples.HelloWorldString.validate_correct` proves, just
-over real `ScriptContext`-shaped `Data` navigation instead of `String`
-arguments already handed to the validator pre-decoded. -/
+/-- `scriptInfo` really is `Constr _ [_, Constr _ [Constr _ [.b owner]]]`
+    — walking down through the `Just`-wrapped, `Datum`-wrapped owner
+    bytes, all the way to `.b`, same reasoning as `RedeemerOk`. -/
+def ScriptInfoOk (scriptInfo : Data) : Prop :=
+  match scriptInfo with
+  | .constr _ [_, .constr _ [.constr _ [.b _]]] => True
+  | _ => False
 
-open Poe.PlutusData (unBData_spec decodeByteStringList_spec constrTag_spec
-  field0_spec field1_spec field2_spec field8_spec)
+/-- `scriptInfo`'s datum owner, given a proof its shape is honest. -/
+def decodeOwner : ∀ scriptInfo, ScriptInfoOk scriptInfo → ByteArray
+  | .constr _ [_, .constr _ [.constr _ [.b ownerBytes]]], _ => ownerBytes
 
-/-- Builds the `Data` shape `isHonestScriptContext` expects, at the
-    `Poe.PlutusData.Data` level — same shape `mkScriptContext`/
-    `mkSpendingScriptInfo` (below) build at the `Poe.Uplc.DataValue`
-    level for the oracle, just so the theorem can be stated over concrete
-    inputs instead of an abstract shape hypothesis for everything.
-    `txInfo` stays abstract (see `isHonestScriptContext_correct`) rather
-    than a fully-built 16-field record — reconstructing that real shape
-    just to re-derive `field8`/`decodeByteStringList` on it would be
-    reproving `Poe.PlutusData`'s own axioms, not saying anything new about
-    `isHonestScriptContext`'s actual navigation logic. -/
-def mkCtxData (txInfo : Data) (messageBytes : ByteArray) (owner : ByteArray) : Data :=
-  .constr 0
-    [ txInfo
-    , .constr 0 [.b messageBytes]
-    , .constr 1 [.b (ByteArray.mk #[]), .constr 0 [.constr 0 [.b owner]]] ]
+/-- `ctx` really has the honest `ScriptContext` shape: `Constr 0
+    [txInfo, redeemer, scriptInfo]`, with each of the three sub-trees
+    honest per its own predicate above. -/
+def WellFormed (ctx : Data) : Prop :=
+  match ctx with
+  | .constr 0 [txInfo, redeemer, scriptInfo] =>
+      TxInfoOk txInfo ∧ RedeemerOk redeemer ∧ ScriptInfoOk scriptInfo
+  | _ => False
 
-/-- Correctness of the honest-`Spending`-with-a-datum path: accepts
-    exactly when the message is right and the owner signed — the same
-    statement `validate_correct` makes, over the real navigation.
-    `signatories` is given via a `field8 txInfo` hypothesis rather than by
-    constructing a full, real 16-field `TxInfo` and re-deriving that
-    `field8`/`decodeByteStringList` extract it correctly — that's already
-    exactly what the `_spec` axioms assert, and what the oracle's
-    `mkTxInfo`-based tests below exercise on the *real* compiled program;
-    reconstructing it here would just restate those, not say anything new
-    about `isHonestScriptContext`'s own logic (the scriptInfo/maybeDatum/
-    message/owner navigation) that this theorem is actually about. The
-    dishonest-shape cases (wrong purpose, no datum) aren't `Data`-shape
-    hypotheses here either — they're a separate, simpler fact:
-    `isHonestScriptContext` is `false` outright whenever `constrTag` of
-    `field2`/`field1 (field2 ·)` isn't `1`/`0`, visible directly from the
-    `if`s in its own definition, with no need to unfold the accessor
-    axioms at all. -/
-theorem isHonestScriptContext_correct
-    (txInfo : Data) (signatories : List ByteArray)
-    (hsig : decodeByteStringList (field8 txInfo) = signatories)
-    (messageBytes : ByteArray) (owner : ByteArray) :
-    isHonestScriptContext (mkCtxData txInfo messageBytes owner) = true ↔
-      messageBytes = "Hello, World!".toUTF8 ∧ owner ∈ signatories := by
-  simp only [isHonestScriptContext, mkCtxData,
-    field0_spec, field1_spec, field2_spec, constrTag_spec, unBData_spec, hsig]
-  simp [elemBytes_iff, ByteArray.beq_iff_eq, and_comm]
+/-- Aiken's `hello_world`, the main validator: the message must be
+    exactly `"Hello, World!"`, and the datum's `owner` must be among the
+    transaction's `signatories`. -/
+def validatorB (ctx : Data) (wf : WellFormed ctx) : Bool :=
+  match ctx, wf with
+  | .constr 0 [txInfo, redeemer, scriptInfo], ⟨wfTxInfo, wfRedeemer, wfScriptInfo⟩ =>
+    let message := decodeMessage redeemer wfRedeemer
+    let signatories := decodeSignatories txInfo wfTxInfo
+    let owner := decodeOwner scriptInfo wfScriptInfo
+    message == "Hello, World!".toUTF8 && elemBytes owner signatories
 
-/-! ## Building test `ScriptContext` blobs -/
-
-def dataStr (s : String) : Poe.Uplc.DataValue := .b s.toUTF8
-
-def mkTxInfo (signatories : List String) : Poe.Uplc.DataValue :=
-  let filler := List.replicate 8 (Poe.Uplc.DataValue.b (ByteArray.mk #[]))
-  .constr 0 (filler.take 8 ++ [.list (signatories.map dataStr)] ++ filler.take 7)
-
-/-- `scriptInfo` for an honest `Spending` invocation with an inline datum
-    whose owner is `owner`. -/
-def mkSpendingScriptInfo (owner : String) : Poe.Uplc.DataValue :=
-  .constr 1
-    [ .constr 0 [.b (ByteArray.mk #[])]           -- dummy TxOutRef
-    , .constr 0 [.constr 0 [dataStr owner]] ]     -- Just (Datum { owner })
-
-/-- `scriptInfo` for a `Spending` invocation with *no* datum (`None`). -/
-def mkSpendingScriptInfoNoDatum : Poe.Uplc.DataValue :=
-  .constr 1 [.constr 0 [.b (ByteArray.mk #[])], .constr 1 []]
-
-/-- `scriptInfo` for a non-`Spending` purpose (any tag other than 1). -/
-def mkMintingScriptInfo : Poe.Uplc.DataValue :=
-  .constr 0 [.b (ByteArray.mk #[])]
-
-def mkScriptContext (message : String) (signatories : List String)
-    (scriptInfo : Poe.Uplc.DataValue) : Poe.Uplc.Term :=
-  .const (.data (.constr 0
-    [ mkTxInfo signatories
-    , .constr 0 [dataStr message]   -- Redeemer { msg }
-    , scriptInfo ]))
-
-/- Honest: Spending, has a datum, owner signed, right message.
-   Dishonest: not a Spending script; Spending but no datum; right
-   shape but owner isn't a signatory; wrong message. -/
-#eval show Lean.CoreM Unit from do
-  let signers := ["bob", "alice", "carol"]
-  Poe.Oracle.runSuite ``validateScriptContext
-    [([mkScriptContext "Hello, World!" signers (mkSpendingScriptInfo "alice")], .unit)]
-  Poe.Oracle.runSuiteAborts ``validateScriptContext
-    [ [mkScriptContext "Hello, World!" signers mkMintingScriptInfo]
-    , [mkScriptContext "Hello, World!" signers mkSpendingScriptInfoNoDatum]
-    , [mkScriptContext "Hello, World!" signers (mkSpendingScriptInfo "mallory")]
-    , [mkScriptContext "wrong message" signers (mkSpendingScriptInfo "alice")]
-    ]
-
-/-! ## Typed backend: `isHonestScriptContext` through `Poe.TranslateTplc`
-
-The same flagship validator, this time compiled via the *typed* backend
-and checked through `Poe.TplcOracle` — the real `plc` executable, not a
-hand-copied transcript. Getting here required two real translator
-fixes, both found by this exact test failing first: `Bool`/`Unit`
-*construction* (not just `.cases` branching on them) wasn't
-special-cased at all, and `Decidable.decide (p : Prop) [h : Decidable
-p] : Bool` — reached via `Int`'s `==`, not `<` — has a `Prop`-*sorted*
-parameter `p` that `isTypeFormerType` alone misclassifies as a real
-`tyAbs` binder, even though call sites pass it as `Arg.erased` (an
-arity mismatch that mistranslated `==`-based comparisons specifically,
-`<`-based ones like `absInt`'s were already fine). -/
-
-open Poe.Uplc in
-def honestCtxDataTplc : Const :=
-  .data (.constr 0
-    [ mkTxInfo ["bob", "alice", "carol"]
-    , .constr 0 [dataStr "Hello, World!"]
-    , mkSpendingScriptInfo "alice" ])
-
-open Poe.Uplc in
-def wrongSignerCtxDataTplc : Const :=
-  .data (.constr 0
-    [ mkTxInfo ["bob", "alice", "carol"]
-    , .constr 0 [dataStr "Hello, World!"]
-    , mkSpendingScriptInfo "mallory" ])
-
-open Poe.Uplc in
-def mintingCtxDataTplc : Const :=
-  .data (.constr 0
-    [ mkTxInfo ["bob", "alice", "carol"]
-    , .constr 0 [dataStr "Hello, World!"]
-    , mkMintingScriptInfo ])
-
-#eval show Lean.CoreM Unit from do
-  IO.println (Poe.EmitTplc.emit (← Poe.TranslateTplc.translate ``isHonestScriptContext))
--- Expected values given directly rather than derived from a real
--- `Poe.PlutusData.Data` value: `honestCtxDataTplc`/... are built from
--- `Poe.Uplc.DataValue` (the untyped emitter's own hand-built test-data
--- representation, same as `Poe.Oracle`'s own HelloWorld tests above),
--- not a real `Data` round-trip, so there's no *actual Lean value* to
--- compute here — the expectation is what the honest/dishonest scenario
--- is constructed to mean, same as `Poe.Oracle.runSuite`/`runSuiteAborts`
--- above already do for this exact function.
-#eval show Lean.CoreM Unit from
-  Poe.TplcOracle.runSuite ``isHonestScriptContext
-    [ ([.constant honestCtxDataTplc], .bool true)
-    , ([.constant wrongSignerCtxDataTplc], .bool false)
-    , ([.constant mintingCtxDataTplc], .bool false)
-    ]
+/-- The deployable artifact: turns `validatorB`'s `Bool` into
+    the `()`-or-abort shape a real script needs. All the logic lives
+    above; this is deliberately a one-line wrapper. -/
+def validatorE (ctx : Data) (wf : WellFormed ctx) : Unit :=
+  Poe.Prelude.check (validatorB ctx wf)
 
 end Poe.Examples.HelloWorld

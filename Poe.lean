@@ -12,9 +12,8 @@ import Poe.Oracle
 import Poe.Lint
 import Poe.Examples.First
 import Poe.Examples.TplcFirst
-import Poe.Examples.OutOfFragment
+import Poe.Experiments.OutOfFragment
 import Poe.Examples.HelloWorldString
-import Poe.Examples.DataDecoding
-import Poe.Examples.AikenHelloWorld
+import Poe.Lib.DataDecoding
 import Poe.Examples.HelloWorld
-import Poe.Examples.IdealValidator
+import Poe.Examples.HelloWorldCorrect

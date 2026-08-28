@@ -11,25 +11,32 @@ single-constructor placeholder, specifically so proofs can pattern-match
 on shape (see below).
 
 `unBData`/`decodeByteStringList`/`constrTag`/`field0`/`field1`/`field2`/
-`field8` all stay exactly as before — self-recursive placeholders,
-special-cased *by name* in `Translate`, which maps each straight to the
-real UPLC builtin/hand-built loop rather than compiling whatever's
-written here (see each one's own comment). That's deliberately
-*unchanged*: their compiled behaviour is already proven safe (D2's oracle
-suites), and nothing about proofs requires touching it.
+`field8` all stay self-recursive placeholders, special-cased *by name* in
+`Translate`, which maps each straight to the real UPLC builtin/hand-built
+loop rather than compiling whatever's written here (see each one's own
+comment). That's deliberately *unchanged*: their compiled behaviour is
+already proven safe (D2's oracle suites), and nothing about proofs
+requires touching it.
 
-What changes is that these placeholders are no longer *totally* opaque:
-the `_spec` axioms below say what each one actually computes when handed
-a value built from `Data`'s real constructors, which is the missing
-ingredient for saying anything about a validator that calls them —
-without this, e.g. `field0 d` only satisfies the tautology `field0 d =
-field0 d`, and no proof can relate it to what `d` actually contains. The
-axioms are the honest trust boundary: `Translate` emits UPLC that is
-*claimed* to match this semantics (and D2's oracle empirically exercises
-that claim against the real `uplc` binary), but proving the translator
-itself correct is out of scope (PLAN.md non-goal) — proofs built on these
-axioms are conditional on that claim, same as any verified-source-level
-reasoning about a trusted compiler backend. -/
+Real Plutus `un*` builtins (`unConstrData`, `unBData`, `unListData`, ...)
+are *total as CEK steps but partial on their intended domain* — applying
+`unConstrData` to a `Data` value that isn't actually a `Constr` doesn't
+type-error (there's no such thing; `data` is one universal type), it
+raises a fatal, uncatchable evaluation failure. Every accessor below
+takes an explicit ghost precondition asserting the shape it needs,
+exactly the way `Poe.Examples.First.divide` already takes `hy : y ≠ 0`
+for division by zero: the precondition is `Prop`-sorted, so it's erased
+by the *already-existing* Kreisel/proof-irrelevance machinery — nothing
+new needs to compile, `Translate`'s name-based special-casing of the
+underlying builtin is untouched, and a caller either has the proof (an
+earlier `Decidable`-checked shape test, or literal knowledge of how the
+value was built) or must fall through to `Poe.Prelude.abort`/`poeError`
+instead of calling the accessor at all. That's the honest trust boundary
+this file is about: `_spec` axioms below say what each accessor computes
+*given* its precondition — proofs built on them are conditional on
+`Translate` actually implementing this semantics (D2's oracle empirically
+exercises that claim against the real `uplc` binary; proving the
+translator itself correct is out of scope, a PLAN.md non-goal). -/
 
 namespace Poe.PlutusData
 
@@ -39,11 +46,27 @@ inductive Data where
   | b      : ByteArray → Data
   | i      : Int → Data
 
+/-- Ghost-only (never computed on-chain, never appears in compiled code):
+    `d` really is a `Constr` application, of any arity. -/
+def IsConstr (d : Data) : Prop := ∃ tag fields, d = .constr tag fields
+
+/-- Ghost-only: `d` really is a `Constr` application with a field at
+    index `n`. -/
+def HasFieldAt (d : Data) (n : Nat) : Prop :=
+  ∃ tag fields, d = .constr tag fields ∧ n < fields.length
+
+/-- Ghost-only: `d` really is a `B` (bytestring) value. -/
+def IsB (d : Data) : Prop := ∃ b, d = .b b
+
+/-- Ghost-only: `d` really is a `List` of `B` values throughout — exactly
+    what `decodeByteStringList` needs to decode every element. -/
+def IsByteStringList (d : Data) : Prop := ∃ bss : List ByteArray, d = .list (bss.map .b)
+
 /-- Maps straight to the real UPLC builtin of the same name (see module
     doc: `opaque`, not `axiom`, so callers still compile). -/
-opaque unBData (_ : Data) : ByteArray := ByteArray.mk #[]
+opaque unBData (d : Data) (_ : IsB d) : ByteArray := ByteArray.mk #[]
 
-axiom unBData_spec (bs : ByteArray) : unBData (.b bs) = bs
+axiom unBData_spec (b : ByteArray) (h : IsB (.b b)) : unBData (.b b) h = b
 
 /-- Decodes a `Data`-encoded list of byte strings (`unListData` then
     `unBData` on each element) into an ordinary `List ByteArray`. See the
@@ -63,10 +86,11 @@ axiom unBData_spec (bs : ByteArray) : unBData (.b bs) = bs
     distinguishing its two inputs. A genuinely divergent, self-recursive
     body has no knowable constructor to find, for the same reason `abort`
     needed one. -/
-partial def decodeByteStringList (d : Data) : List ByteArray := decodeByteStringList d
+partial def decodeByteStringList (d : Data) (h : IsByteStringList d) : List ByteArray :=
+  decodeByteStringList d h
 
-axiom decodeByteStringList_spec (bss : List ByteArray) :
-    decodeByteStringList (.list (bss.map .b)) = bss
+axiom decodeByteStringList_spec (bss : List ByteArray) (h : IsByteStringList (.list (bss.map .b))) :
+    decodeByteStringList (.list (bss.map .b)) h = bss
 
 /-!
 ## Generic `Data`-record accessors
@@ -98,73 +122,37 @@ the named call disappear from a caller's mono LCNF before `Translate`
 ever gets to special-case it. The `_spec` axioms below carry the real
 semantics instead, entirely separately from what's actually compiled. -/
 
-partial def constrTag (d : Data) : Int := constrTag d
-partial def field0 (d : Data) : Data := field0 d
-partial def field1 (d : Data) : Data := field1 d
-partial def field2 (d : Data) : Data := field2 d
-partial def field8 (d : Data) : Data := field8 d
+partial def constrTag (d : Data) (h : IsConstr d) : Int := constrTag d h
+partial def field0 (d : Data) (h : HasFieldAt d 0) : Data := field0 d h
+partial def field1 (d : Data) (h : HasFieldAt d 1) : Data := field1 d h
+partial def field2 (d : Data) (h : HasFieldAt d 2) : Data := field2 d h
+partial def field8 (d : Data) (h : HasFieldAt d 8) : Data := field8 d h
 
-axiom constrTag_spec (tag : Nat) (fields : List Data) :
-    constrTag (.constr tag fields) = Int.ofNat tag
+axiom constrTag_spec (tag : Nat) (fields : List Data) (h : IsConstr (.constr tag fields)) :
+    constrTag (.constr tag fields) h = Int.ofNat tag
 
-axiom field0_spec (tag : Nat) (f0 : Data) (rest : List Data) :
-    field0 (.constr tag (f0 :: rest)) = f0
+axiom field0_spec (tag : Nat) (f0 : Data) (rest : List Data)
+    (h : HasFieldAt (.constr tag (f0 :: rest)) 0) :
+    field0 (.constr tag (f0 :: rest)) h = f0
 
-axiom field1_spec (tag : Nat) (f0 f1 : Data) (rest : List Data) :
-    field1 (.constr tag (f0 :: f1 :: rest)) = f1
+axiom field1_spec (tag : Nat) (f0 f1 : Data) (rest : List Data)
+    (h : HasFieldAt (.constr tag (f0 :: f1 :: rest)) 1) :
+    field1 (.constr tag (f0 :: f1 :: rest)) h = f1
 
-axiom field2_spec (tag : Nat) (f0 f1 f2 : Data) (rest : List Data) :
-    field2 (.constr tag (f0 :: f1 :: f2 :: rest)) = f2
+axiom field2_spec (tag : Nat) (f0 f1 f2 : Data) (rest : List Data)
+    (h : HasFieldAt (.constr tag (f0 :: f1 :: f2 :: rest)) 2) :
+    field2 (.constr tag (f0 :: f1 :: f2 :: rest)) h = f2
 
-axiom field8_spec (tag : Nat) (f0 f1 f2 f3 f4 f5 f6 f7 f8 : Data) (rest : List Data) :
-    field8 (.constr tag (f0 :: f1 :: f2 :: f3 :: f4 :: f5 :: f6 :: f7 :: f8 :: rest)) = f8
+axiom field8_spec (tag : Nat) (f0 f1 f2 f3 f4 f5 f6 f7 f8 : Data) (rest : List Data)
+    (h : HasFieldAt (.constr tag (f0 :: f1 :: f2 :: f3 :: f4 :: f5 :: f6 :: f7 :: f8 :: rest)) 8) :
+    field8 (.constr tag (f0 :: f1 :: f2 :: f3 :: f4 :: f5 :: f6 :: f7 :: f8 :: rest)) h = f8
 
-/-!
-## Shape-guarded accessors
-
-The `_spec` axioms above only ever fire when a proof already knows `d`'s
-*exact literal* shape (`isHonestScriptContext_correct` gets this for free
-because it universally quantifies over `mkCtxData`'s own construction).
-They say nothing at all — not "returns some field", not "the compiled
-program aborts" — about `field0 d` for a `d` whose shape isn't already
-pinned down that way, which is exactly the case a validator is actually
-in when navigating a nested, attacker-supplied `Redeemer`/`Datum`
-(`isHonestScriptContext`'s own `field1 redeemer`/`field0 (field0
-maybeDatum)` calls have no such proof available at all right now).
-
-`HasFieldAt` names the missing ghost precondition; `field0Safe` is
-*total*, given a proof of it — nothing new compiles, the proof argument
-erases and the emitted UPLC is the exact same `field0`/`unConstrData`
-chain as before (`Translate` still special-cases the name `field0`
-itself, reached through the wrapper's transparent body). What's gained is
-purely proof-side: one reusable precondition per accessor instead of a
-fresh literal-shape hypothesis manufactured at every call site, so a
-validator can be proved correct about a `d` whose shape is only known
-indirectly (derived from an earlier check), not just one built by a
-`mk...Data`-style test helper.
-
-The real payoff this sets up, not yet done: on real chain data nobody
-*has* a `HasFieldAt d n` proof for free — a caller either derives one
-from an earlier `Decidable`-checked shape test (and then knows
-`field0Safe` matches its spec), or has no such proof and must fall
-through to `Poe.Prelude.abort`/`poeError` instead of calling any
-accessor at all. That's the shape a validator's dishonest-input path
-*should* have, and currently doesn't for `isHonestScriptContext`'s nested
-fields — see its own module for the gap this closes. -/
-
-/-- Ghost-only (never computed on-chain, never appears in compiled code):
-    `d` really is a `Constr` application with a field at index `n`. -/
-def HasFieldAt (d : Data) (n : Nat) : Prop :=
-  ∃ tag fields, d = .constr tag fields ∧ n < fields.length
-
-def field0Safe (d : Data) (_ : HasFieldAt d 0) : Data := field0 d
-
-theorem field0Safe_spec {d : Data} {tag : Nat} {fields : List Data}
-    (heq : d = .constr tag fields) (hlt : 0 < fields.length) :
-    field0Safe d ⟨tag, fields, heq, hlt⟩ = fields[0] := by
-  subst heq
-  cases fields with
-  | nil => simp at hlt
-  | cons f0 rest => exact field0_spec tag f0 rest
+/-- `HasFieldAt` at any index already witnesses the weaker `IsConstr` —
+    lets a caller pass one `HasFieldAt d n` hypothesis and get both
+    `field n d` and `constrTag d`'s preconditions from it, instead of
+    needing two separate ones for the same value. -/
+theorem HasFieldAt.isConstr {d : Data} {n : Nat} (h : HasFieldAt d n) : IsConstr d :=
+  let ⟨tag, fields, heq, _⟩ := h
+  ⟨tag, fields, heq⟩
 
 end Poe.PlutusData

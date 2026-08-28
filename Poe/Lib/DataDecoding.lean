@@ -10,20 +10,25 @@ import Poe.PlutusData
 got `unBData`/`decodeByteStringList` (see `Poe.PlutusData`) working —
 kept around since they isolate the two primitives from each other (if a
 future regression breaks list-decoding specifically, `validateOwnerData`
-still passing says the fault isn't in `unBData` itself). The real thing —
-Aiken's `hello_world` template's shape, with real `Data` throughout — is
-`Poe.Examples.AikenHelloWorld`, which reuses `elemBytes`/`encodeBytes`/
-`encodeByteList` from here.
+still passing says the fault isn't in `unBData` itself). `elemBytes`/
+`elemBytes_iff`/`ByteArray.beq_iff_eq` are genuinely shared library code,
+not example-specific — used by `Poe.Examples.HelloWorld`'s own
+correctness reasoning, which is why this file lives under `Poe.Lib`
+rather than `Poe.Examples`.
 -/
 
-namespace Poe.Examples.DataDecoding
+namespace Poe.Lib.DataDecoding
 
-open Poe.PlutusData (Data unBData decodeByteStringList)
+open Poe.PlutusData (Data unBData decodeByteStringList IsB IsByteStringList)
 
 /-- Does the `Data`-encoded `owner` equal the `Data`-encoded
-    `expectedOwner`? -/
-def validateOwnerData (owner expectedOwner : Data) : Unit :=
-  Poe.Prelude.check (unBData owner == unBData expectedOwner)
+    `expectedOwner`? `ho`/`he` are the ghost preconditions `unBData` now
+    requires, exactly like `Poe.Examples.First.divide`'s `hy : y ≠ 0` —
+    the caller has to already know the shape, same as before, just made
+    explicit instead of assumed. -/
+def validateOwnerData (owner expectedOwner : Data) (ho : IsB owner) (he : IsB expectedOwner) :
+    Unit :=
+  Poe.Prelude.check (unBData owner ho == unBData expectedOwner he)
 
 def elemBytes (x : ByteArray) : List ByteArray → Bool
   | []      => false
@@ -50,9 +55,11 @@ theorem elemBytes_iff (x : ByteArray) : ∀ ys, elemBytes x ys = true ↔ x ∈ 
   | y :: ys => by simp [elemBytes, elemBytes_iff x ys, ByteArray.beq_iff_eq]
 
 /-- Does the `Data`-encoded `owner` appear in the `Data`-encoded
-    `signatories`? -/
-def validateSignerData (owner signatories : Data) : Unit :=
-  Poe.Prelude.check (elemBytes (unBData owner) (decodeByteStringList signatories))
+    `signatories`? Same ghost-precondition treatment as
+    `validateOwnerData`. -/
+def validateSignerData (owner signatories : Data) (ho : IsB owner)
+    (hs : IsByteStringList signatories) : Unit :=
+  Poe.Prelude.check (elemBytes (unBData owner ho) (decodeByteStringList signatories hs))
 
 #eval Poe.Lint.check ``validateOwnerData
 #eval Poe.Lint.check ``elemBytes
@@ -77,4 +84,4 @@ def encodeByteList (ss : List String) : Poe.Uplc.Term :=
   Poe.Oracle.runSuiteAborts ``validateSignerData
     [[encodeBytes "mallory", signers]]
 
-end Poe.Examples.DataDecoding
+end Poe.Lib.DataDecoding

@@ -393,6 +393,12 @@ partial def translateConstCall (ctx : Ctx) (declName : Name) (args : Array Arg) 
   if let some (selfName, selfDepth) := ctx.self then
     if declName == selfName then
       return ← applyArgsTplc ctx (.var (ctx.termDepth - 1 - selfDepth)) args
+  -- Ghost (`Prop`-typed) arguments — e.g. `Poe.PlutusData.field0`'s new
+  -- `HasFieldAt d 0` precondition — must be dropped before the
+  -- arity-based match below, matching `applyArgsTplc`'s own erasure;
+  -- unlike `.type` (never relevant to these monomorphic accessors), an
+  -- unfiltered `.erased` here silently breaks the `#[a]` arity match.
+  let args := args.filter fun | .erased => false | _ => true
   match declName, args with
   | ``Int.ofNat, #[a] =>
     match a with
