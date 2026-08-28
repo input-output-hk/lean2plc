@@ -112,9 +112,23 @@ structure Ctx where
       inside its own body go through the fixpoint's "self" binder
       (`typedFix`) instead of the ordinary callee/builtin lookup. -/
   self : Option (Name × Nat) := none
+  /-- Fvars bound to a *native* builtin `list` (e.g. the field list
+      `unConstrData`/`unListData` hand back) rather than the ordinary
+      `IWrap`-encoded `listTy` a Lean `List α` otherwise translates to —
+      same role as `Poe.Translate.Ctx.nativeListVars`, needed here because
+      TPLC is fully type-checked: the two representations are genuinely
+      different `Ty`s (`nativeListOfDataTy` vs `listTy (.builtin .data)`),
+      and using the wrong one at a binder makes `plc` reject the term. -/
+  nativeListVars : List FVarId := []
 
 def Ctx.bindTerm (ctx : Ctx) (fvarId : FVarId) : Ctx :=
   { ctx with termDepth := ctx.termDepth + 1, termVars := (fvarId, ctx.termDepth) :: ctx.termVars }
+
+def Ctx.markNative (ctx : Ctx) (fvarId : FVarId) : Ctx :=
+  { ctx with nativeListVars := fvarId :: ctx.nativeListVars }
+
+def Ctx.isNative (ctx : Ctx) (fvarId : FVarId) : Bool :=
+  ctx.nativeListVars.contains fvarId
 
 def Ctx.bindTy (ctx : Ctx) (fvarId : FVarId) : Ctx :=
   { ctx with tyDepth := ctx.tyDepth + 1, tyVars := (fvarId, ctx.tyDepth) :: ctx.tyVars }
@@ -369,6 +383,22 @@ def translateArgTplc (ctx : Ctx) : Arg → CoreM Tplc.Term
   | .erased | .type _ =>
     throwError "translateTplc: erased/type argument reached a Data accessor (out of fragment)"
 
+/-- Same definition as `Poe.Translate.singleRealAlt` (duplicated, same
+    reason `codeMentionsSelf` below is): a joint match against an erased
+    shape proof rules out every `Data`/native-list constructor but one,
+    compiling the rest to `Code.unreach`. Real TPLC `Case` can't dispatch
+    on a builtin `data` value either (same `annotateCaseBuiltin` rules the
+    untyped fragment's finding rests on), so this backend's `Data` cases
+    handling below trusts the single live branch the same way. -/
+def singleRealAlt (cases : Cases) : CoreM (Name × Array Param × Code) := do
+  let isUnreach : Alt → Bool
+    | .alt _ _ (.unreach _) => true
+    | .default (.unreach _) => true
+    | _ => false
+  match cases.alts.filter (!isUnreach ·) with
+  | #[.alt ctorName params code] => return (ctorName, params, code)
+  | alts => throwError "translateTplc: cases on {cases.typeName} has {alts.size} reachable alternatives, need exactly 1 (out of fragment)"
+
 /-- `Code.let`/`LetValue.const` self-references detect recursion, same
     definition as `Poe.Translate.codeMentionsSelf` (duplicated rather than
     shared since the two translators are expected to diverge further as
@@ -530,6 +560,78 @@ partial def translateCode (ctx : Ctx) : Code → CoreM Tplc.Term
       -- variable equally well (it's unused in the body), so `resultTy`
       -- itself is as good a choice as any.
       return .tyInst scrutinee resultTy
+    else if cases.typeName == ``Nat then
+      -- A literal-tag match (`.constr 0 [...]`) compiles, at base phase,
+      -- to a genuine `cases` on `Nat` itself (`Nat.zero`/`Nat.succ`) — the
+      -- mono-phase-only `Nat.decEq`+`Bool` collapse hasn't happened yet
+      -- (confirmed directly: dumping `validatorB`'s base LCNF shows `cases
+      -- a.1 : Bool | Nat.zero => ... | Nat.succ n => ⊥`). `Nat` is a
+      -- builtin `integer` at runtime, not an SoP value, so real `Case`
+      -- can't dispatch on it either — same trust-the-single-live-branch
+      -- strategy as `Data` below, not a runtime `equalsInteger` check.
+      let (ctorName, allParams, code) ← singleRealAlt cases
+      let params := allParams.filter fun p => !p.type.isErased
+      let discrTerm := Tplc.Term.var (← ctx.lookupTerm cases.discr)
+      match ctorName, params with
+      | ``Nat.zero, #[] => translateCode ctx code
+      | ``Nat.succ, #[predParam] =>
+        let body ← translateCode (ctx.bindTerm predParam.fvarId) code
+        return .apply (.lamAbs (.builtin .integer) body)
+          (.apply (.apply (.builtin .subtractInteger) discrTerm) (.constant (.integer 1)))
+      | _, _ => throwError "translateTplc: unexpected Nat constructor {ctorName}"
+    else if cases.typeName == ``Poe.PlutusData.Data then
+      -- Same reasoning as `Poe.Translate.translateCode`'s `Data` case:
+      -- every real use is guarded by an erased shape proof (exactly one
+      -- live branch, the rest `Code.unreach`), and real `Case` can't
+      -- dispatch on a builtin `data` value at all — so trust the one
+      -- live branch and apply the matching `un*Data` accessor directly.
+      -- `constr`'s field list is `nativeListOfDataTy`, *not* whatever
+      -- `translateTy` would derive from the Lean `List Data` type (that's
+      -- the different, `IWrap`-encoded `listTy`) — marked native so a
+      -- further destructure below picks the matching `case` convention.
+      let (ctorName, allParams, code) ← singleRealAlt cases
+      let params := allParams.filter fun p => !p.type.isErased
+      let discrTerm := Tplc.Term.var (← ctx.lookupTerm cases.discr)
+      match ctorName, params with
+      | ``Poe.PlutusData.Data.constr, #[tagParam, fieldsParam] =>
+        let ctx' := ((ctx.bindTerm tagParam.fvarId).bindTerm fieldsParam.fvarId).markNative fieldsParam.fvarId
+        let body ← translateCode ctx' code
+        let curried := Tplc.Term.lamAbs (.builtin .integer) (.lamAbs nativeListOfDataTy body)
+        -- Both values apply as siblings of the lambdas they fill (not
+        -- nested inside an inner lambda's body), matching
+        -- `Poe.Translate`'s own fix for the same de Bruijn hazard.
+        return #[constrTagTerm discrTerm, fieldsOfTerm discrTerm].foldl .apply curried
+      | ``Poe.PlutusData.Data.b, #[byteParam] =>
+        let body ← translateCode (ctx.bindTerm byteParam.fvarId) code
+        return .apply (.lamAbs (.builtin .bytestring) body) (.apply (.builtin .unBData) discrTerm)
+      | ``Poe.PlutusData.Data.list, #[listParam] =>
+        let body ← translateCode ((ctx.bindTerm listParam.fvarId).markNative listParam.fvarId) code
+        return .apply (.lamAbs nativeListOfDataTy body) (.apply (.builtin .unListData) discrTerm)
+      | ``Poe.PlutusData.Data.i, _ =>
+        throwError "translateTplc: Data.i (integer-as-Data) not yet handled (out of fragment)"
+      | _, _ => throwError "translateTplc: unexpected Data constructor {ctorName}"
+    else if cases.typeName == ``List && ctx.isNative cases.discr then
+      -- Native builtin list (see `Ctx.nativeListVars`): unlike the
+      -- `IWrap`-encoded `List` handled below, this needs no `unwrap` (it's
+      -- not a recursive-type value at all, just `list data`), and the
+      -- element/tail binders need the native `Ty`s, not whatever
+      -- `translateTy` would derive from the Lean types.
+      let some (.alt _ consParams consCode) :=
+          cases.alts.find? (fun | .alt n .. => n == ``List.cons | .default _ => false)
+        | throwError "translateTplc: native List cases missing a List.cons alternative"
+      let some nilAlt :=
+          cases.alts.find? (fun | .alt n .. => n == ``List.nil | .default _ => false)
+            <|> cases.alts.find? (fun | .default _ => true | _ => false)
+        | throwError "translateTplc: native List cases missing a List.nil alternative (no default either)"
+      let #[headParam, tailParam] := consParams.filter fun p => !p.type.isErased
+        | throwError "translateTplc: native List.cons alt has unexpected (erased-mixed) param shape"
+      let nilBranch ← translateCode ctx nilAlt.getCode
+      let consCtx := ((ctx.bindTerm headParam.fvarId).bindTerm tailParam.fvarId).markNative tailParam.fvarId
+      let consBody ← translateCode consCtx consCode
+      let consBranch := Tplc.Term.lamAbs (.builtin .data) (.lamAbs nativeListOfDataTy consBody)
+      let resultTy ← translateTy ctx cases.resultType
+      let scrutinee := Tplc.Term.var (← ctx.lookupTerm cases.discr)
+      return .case resultTy scrutinee [consBranch, nilBranch]
     else if cases.typeName == ``List then
       let some nilAlt := cases.alts.find? (fun | .alt n .. => n == ``List.nil | .default _ => false)
         | throwError "translateTplc: List cases missing a List.nil alternative"
