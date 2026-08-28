@@ -17,3 +17,4 @@ import Poe.Examples.HelloWorldString
 import Poe.Lib.DataDecoding
 import Poe.Examples.HelloWorld
 import Poe.Examples.HelloWorldCorrect
+import Poe.Examples.HelloWorldOracle
