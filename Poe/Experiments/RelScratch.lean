@@ -1,7 +1,7 @@
 import Poe.Tplc
 import Poe.TranslateTplc
 import Poe.Bridge
-import Poe.Examples.VecScratch
+import Poe.Experiments.VecScratch
 import Poe.Examples.First
 import Poe.Examples.TplcFirst
 
@@ -25,9 +25,9 @@ polymorphic, but it's the right first check that the relation's
 "apply and compare" plumbing is real, not a stand-in.
 -/
 
-namespace Poe.Examples.RelScratch
+namespace Poe.Experiments.RelScratch
 
-open Poe.Bridge Poe.Examples.VecScratch
+open Poe.Bridge Poe.Experiments.VecScratch
 open PlutusCore.UPLC PlutusCore.UPLC.CekMachine PlutusCore.UPLC.CekValue
 
 abbrev RelEnv := List (CekValue → CekValue → Prop)
@@ -258,4 +258,4 @@ theorem idList_self_related :
 
 #print axioms idList_self_related
 
-end Poe.Examples.RelScratch
+end Poe.Experiments.RelScratch

@@ -12,7 +12,7 @@ demonstrate this: it's a single-field structure whose proof field erases
 away, collapsing to plain `Nat` at mono LCNF.)
 -/
 
-namespace Poe.Examples
+namespace Poe.Experiments.OutOfFragment
 
 inductive Vec (α : Type) : Nat → Type
   | nil : Vec α 0
@@ -24,4 +24,4 @@ def vheadOfFragment {α} {n} (v : Vec α (n + 1)) : α :=
 
 #eval Poe.Lint.check ``vheadOfFragment
 
-end Poe.Examples
+end Poe.Experiments.OutOfFragment

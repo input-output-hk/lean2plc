@@ -9,7 +9,7 @@ dependent index" would look like for Poe. Not wired into any
 translator, not a claim about what Poe supports today.
 -/
 
-namespace Poe.Examples.VecScratch
+namespace Poe.Experiments.VecScratch
 
 open Poe.Bridge
 open PlutusCore.UPLC
@@ -474,4 +474,4 @@ def getTag {tag : Nat} (d : {d : Poe.PlutusData.Data // isTaggedData tag d}) : N
 
 #eval Poe.Translate.dumpMonoLCNF ``getTag
 
-end Poe.Examples.VecScratch
+end Poe.Experiments.VecScratch
