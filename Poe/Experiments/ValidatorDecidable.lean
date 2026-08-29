@@ -55,3 +55,26 @@ def validatorEDecidable (ctx : Data) (wf : WellFormed ctx) : Unit :=
   | isFalse _ => Poe.Prelude.abort ()
 
 end Poe.Experiments.ValidatorDecidable
+
+open Poe.Uplc
+
+def mkCtxDecidable (msg owner : String) (signatories : List String) : Term :=
+  let txInfo := DataValue.constr 0
+    [ .b "f0".toUTF8, .b "f1".toUTF8, .b "f2".toUTF8, .b "f3".toUTF8
+    , .b "f4".toUTF8, .b "f5".toUTF8, .b "f6".toUTF8, .b "f7".toUTF8
+    , .list (signatories.map (fun s => .b s.toUTF8)) ]
+  let redeemer := DataValue.constr 0 [.b msg.toUTF8]
+  let scriptInfo := DataValue.constr 0 [.b "ignored".toUTF8, .constr 0 [.constr 0 [.b owner.toUTF8]]]
+  .const (.data (.constr 0 [txInfo, redeemer, scriptInfo]))
+
+/- Confirms the untyped backend's `Decidable`-erasure genuinely produces
+   the correct boolean behavior, membership included (`hmem`, built from
+   `elemBytes_iff` the exact same way `heq` is built from
+   `ByteArray.beq_iff_eq`) — not just that it translates without error. -/
+#eval show Lean.CoreM Unit from do
+  Poe.Oracle.runSuite ``Poe.Experiments.ValidatorDecidable.validatorEDecidable
+    [([mkCtxDecidable "Hello, World!" "alice" ["alice", "bob"]], .unit)]
+  Poe.Oracle.runSuiteAborts ``Poe.Experiments.ValidatorDecidable.validatorEDecidable
+    [ [mkCtxDecidable "wrong message" "alice" ["alice", "bob"]]
+    , [mkCtxDecidable "Hello, World!" "mallory" ["alice", "bob"]]
+    ]
