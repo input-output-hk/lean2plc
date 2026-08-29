@@ -476,6 +476,17 @@ partial def translateConstCall (ctx : Ctx) (declName : Name) (args : Array Arg) 
   -- constructing side.
   | ``Decidable.isFalse, #[] => return .constant (.bool false)
   | ``Decidable.isTrue, #[] => return .constant (.bool true)
+  -- `Subtype.mk val proof` — `proof`'s already dropped by the erased-args
+  -- filter above (`Prop`-sorted), so this is the identity on `val`,
+  -- matching `translateLetValue`'s `.proj Subtype 0` case (which is the
+  -- identity in the other direction, unwrapping instead of wrapping).
+  -- Not a fixed-arity pattern: the implicit `{α} {p}` type-former args
+  -- stay in `args` (only `.erased` was dropped above, not `.type`), so
+  -- `val` is found by name rather than by position.
+  | ``Subtype.mk, args =>
+    let some val := args.toList.findSome? fun | .fvar fvarId => some fvarId | _ => none
+      | throwError "translateTplc: Subtype.mk missing its value argument"
+    return .var (← ctx.lookupTerm val)
   | ``PUnit.unit, #[] => return .constant .unit
   -- `Poe.PlutusData`'s accessors are opaque/self-recursive placeholder
   -- bodies (e.g. `field0 d := field0 d`) never meant to be translated
