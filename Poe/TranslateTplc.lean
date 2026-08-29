@@ -741,7 +741,19 @@ partial def translateCode (ctx : Ctx) : Code → CoreM Tplc.Term
     -- builtin-type limitation the way `Data`/`Nat` have. Only difference:
     -- `Vec.cons`'s own params are `[index, head, tail]` (see
     -- `translateConstCall`'s matching `Vec.cons` handling), so the index
-    -- is dropped here too rather than bound.
+    -- is dropped here too rather than bound. This is NOT genuine forcing
+    -- (no recomputation, no check that dropping is safe) — it only works
+    -- because `consCode` never actually needs `_indexParam`'s own fvarId
+    -- (either it's unused, as in `vecHead`/`vecFirstIndexClosed`'s
+    -- `.nil`-only path, or Lean's own dependent-match elaboration already
+    -- reuses an outer, already-bound `n`, as in `vecFirstIndex`). If
+    -- `consCode` ever *does* reference the dropped fvarId with no such
+    -- outer binding available, this fails loudly here — `Ctx.lookupTerm`
+    -- throws "unbound term variable" — rather than silently miscompiling;
+    -- confirmed directly via `vecFirstIndexClosed` in `VecScratch.lean`.
+    -- So the gap is real but narrower than it first looked: a
+    -- completeness gap (can't express a `Vec`-consumer needing its own
+    -- index), not a soundness one (nothing wrong compiles silently).
     else if cases.typeName == `Poe.Experiments.VecScratch.Vec then
       let some nilAlt :=
           cases.alts.find? (fun | .alt n .. => n == `Poe.Experiments.VecScratch.Vec.nil | .default _ => false)

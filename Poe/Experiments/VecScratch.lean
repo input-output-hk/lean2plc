@@ -376,6 +376,64 @@ def vecHead {X : Type} {n : Nat} : Vec X (n + 1) → X
   let _ ← Poe.TplcOracle.runPlcTypecheck program
   IO.println s!"vecHead [7,8,9]: {← Poe.TplcOracle.runPlcEvaluate program}"
 
+/-- The honest test of the `Vec` fix's actual safety margin: a
+    `Vec`-consumer whose body genuinely reads the dropped index `n`
+    (unlike `vecHead`'s, which never mentions it). `translateTplc`'s
+    `Vec.cons` cases-alt handling (`Poe.TranslateTplc.translateCode`)
+    unconditionally drops the index param without binding it in `ctx` —
+    the question is whether that's a silent miscompilation risk or
+    whether `Ctx.lookupTerm`'s existing "unbound term variable" check
+    already catches it. Checked empirically, not assumed. -/
+def vecFirstIndex {X : Type} : {n : Nat} → Vec X (n + 1) → Nat
+  | _, .cons (n := m) _ _ => m
+
+#eval Poe.Translate.dumpMonoLCNF ``vecFirstIndex
+
+/- First attempt: `n` is *also* an outer parameter of `vecFirstIndex`
+   itself, so Lean's own dependent-match elaboration (having derived
+   `m = n` propositionally from the index equation) compiles the
+   `Vec.cons` alt's body as `return x.1` — reusing the *already-bound
+   outer* `n`, never actually referencing the pattern's own fresh index
+   binder (confirmed directly in the LCNF dump above: the alt binds
+   `n.3` and never uses it). So this case translates fine, but it isn't
+   the real test — the outer parameter gives the index compiler a
+   second, legitimate route to the same value, sidestepping the drop
+   entirely. `vecFirstIndexClosed` below closes that loophole. -/
+#eval show Lean.CoreM Unit from do
+  try
+    let _ ← Poe.TranslateTplc.translate ``vecFirstIndex
+    IO.println "vecFirstIndex: translated (unexpected — should have failed)"
+  catch e =>
+    IO.println s!"vecFirstIndex: failed as expected: {← e.toMessageData.toString}"
+
+/-- The real test: `n` is *not* an outer parameter here at all (only the
+    literal `5`), so the alt body's only possible route to the index
+    value is the pattern's own fresh binder — exactly the one
+    `Poe.TranslateTplc.translateCode`'s `Vec.cons` case drops without
+    binding in `ctx`. -/
+def vecFirstIndexClosed {X : Type} (v : Vec X 5) : Nat :=
+  match (5 : Nat), v with
+  | _, .nil => 0
+  | _, .cons (n := m) _ _ => m
+
+#eval Poe.Translate.dumpMonoLCNF ``vecFirstIndexClosed
+
+/- Confirms the answer: `translateTplc` throws a clear translation-time
+   error (`"translateTplc: unbound term variable ..."`) rather than
+   silently producing a wrong or ill-typed program. So the `Vec`/`n`
+   erasure gap identified earlier isn't a silent-miscompilation risk
+   after all — any real attempt to use the dropped index fails loudly,
+   at compile time, pointing at the exact missing variable. The gap is
+   narrower than first characterized: not "could silently misbehave",
+   but "can't express a `Vec`-consumer that needs its own index at all"
+   (a completeness gap, not a soundness one). -/
+#eval show Lean.CoreM Unit from do
+  try
+    let _ ← Poe.TranslateTplc.translate ``vecFirstIndexClosed
+    IO.println "vecFirstIndexClosed: translated (unexpected — should have failed)"
+  catch e =>
+    IO.println s!"vecFirstIndexClosed: failed as expected: {← e.toMessageData.toString}"
+
 /-!
 ## A concrete shot at "no junk" — the paper's own aside, made real
 
