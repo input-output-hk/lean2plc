@@ -359,6 +359,23 @@ def vecHead {X : Type} {n : Nat} : Vec X (n + 1) → X
   let t ← Poe.Translate.translate ``vecHead
   IO.println (Poe.Emit.emit t)
 
+/- `vecHead` genuinely compiles and evaluates correctly through the typed
+   backend — real evidence `Poe.TranslateTplc`'s `Vec` handling
+   (`translateTy`, the `Vec.cons`/`Vec.nil` constructor cases, and the
+   `Vec`-typed `cases` branch) isn't just accepted structurally, checked
+   against the real `plc` binary. `Vec X n` compiles to exactly `listTy X`
+   (the index `n` dropped entirely, same reasoning as forcing: it carries
+   no runtime content, never referenced by `vecHead`'s own body), so a
+   plain `List Int` encoding is directly applicable as the argument. -/
+#eval show Lean.CoreM Unit from do
+  let f ← Poe.TranslateTplc.translate ``vecHead
+  let applied := Poe.Tplc.Term.apply
+    (Poe.Tplc.Term.apply (Poe.Tplc.Term.tyInst f (.builtin .integer)) (.constant (.integer 2)))
+    (Poe.TplcOracle.encodeIntList [7, 8, 9])
+  let program := Poe.EmitTplc.emit applied
+  let _ ← Poe.TplcOracle.runPlcTypecheck program
+  IO.println s!"vecHead [7,8,9]: {← Poe.TplcOracle.runPlcEvaluate program}"
+
 /-!
 ## A concrete shot at "no junk" — the paper's own aside, made real
 

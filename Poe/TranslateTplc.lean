@@ -355,6 +355,14 @@ partial def translateTy (ctx : Ctx) : Expr → CoreM Tplc.Ty
     -- carrier value.
     else if e.isAppOfArity ``Subtype 2 then
       translateTy ctx e.getAppArgs[0]!
+    -- `Vec X n`'s index `n` carries no runtime content (never referenced
+    -- by any real computation over a `Vec` — the same "forcing" situation
+    -- as `Subtype`'s own erased proof, just a real `Nat` instead of a
+    -- `Prop`), so it's dropped entirely and `Vec X n` compiles to exactly
+    -- `listTy X` — reusing `List`'s own ifix/iwrap machinery rather than a
+    -- fresh, indexed pattern functor.
+    else if e.isAppOfArity `Poe.Experiments.VecScratch.Vec 2 then
+      return listTy (← translateTy ctx e.getAppArgs[0]!)
     else
       throwError "translateTplc: unsupported type expression {e} (out of fragment)"
 
@@ -490,8 +498,21 @@ partial def translateConstCall (ctx : Ctx) (declName : Name) (args : Array Arg) 
         let fields ← (args.toList.filterMap fun | .fvar fvarId => some fvarId | _ => none).mapM
           fun fvarId => return Tplc.Term.var (← ctx.lookupTerm fvarId)
         return .iwrap listPatFunctor elemTy (.constr (listUnrolledSop elemTy) info.cidx fields)
+      -- `Vec X n` compiles to exactly `listTy X` (see `translateTy`'s own
+      -- `Vec` case) — `Vec.cons`'s own signature is `{n : Nat} → X → Vec X
+      -- n → Vec X (n+1)`, so its *first* fvar field is always the index,
+      -- dropped for the same reason `translateTy` drops it: no runtime
+      -- content, never referenced by any real computation over a `Vec`.
+      else if info.induct == `Poe.Experiments.VecScratch.Vec then
+        let some elemTyExpr := args.toList.findSome? fun | .type e => some e | _ => none
+          | throwError "translateTplc: {declName} missing its element-type argument"
+        let elemTy ← translateTy ctx elemTyExpr
+        let allFields ← (args.toList.filterMap fun | .fvar fvarId => some fvarId | _ => none).mapM
+          fun fvarId => return Tplc.Term.var (← ctx.lookupTerm fvarId)
+        let fields := if declName == `Poe.Experiments.VecScratch.Vec.cons then allFields.drop 1 else allFields
+        return .iwrap listPatFunctor elemTy (.constr (listUnrolledSop elemTy) info.cidx fields)
       else
-        throwError "translateTplc: constructors of {info.induct} not yet handled (only List, out of fragment)"
+        throwError "translateTplc: constructors of {info.induct} not yet handled (only List/Vec, out of fragment)"
     else
       match builtinTable.lookup declName with
       | some b => applyArgsTplc ctx (.builtin b) args
@@ -671,6 +692,30 @@ partial def translateCode (ctx : Ctx) : Code → CoreM Tplc.Term
       let scrutinee := Tplc.Term.unwrap (.var (← ctx.lookupTerm cases.discr))
       -- Branch order = declaration order (`nil` = 0, `cons` = 1), same
       -- convention `Poe.Translate`'s own `ctorNames`-ordered `case` uses.
+      return .case resultTy scrutinee [nilBranch, consBranch]
+    -- Same shape as `List`'s own case just above — `Vec X n` compiles to
+    -- `listTy X`, so `case` works on it directly the same way, no
+    -- builtin-type limitation the way `Data`/`Nat` have. Only difference:
+    -- `Vec.cons`'s own params are `[index, head, tail]` (see
+    -- `translateConstCall`'s matching `Vec.cons` handling), so the index
+    -- is dropped here too rather than bound.
+    else if cases.typeName == `Poe.Experiments.VecScratch.Vec then
+      let some nilAlt :=
+          cases.alts.find? (fun | .alt n .. => n == `Poe.Experiments.VecScratch.Vec.nil | .default _ => false)
+        | throwError "translateTplc: Vec cases missing a Vec.nil alternative"
+      let some (.alt _ consParams consCode) :=
+          cases.alts.find? (fun | .alt n .. => n == `Poe.Experiments.VecScratch.Vec.cons | .default _ => false)
+        | throwError "translateTplc: Vec cases missing a Vec.cons alternative"
+      let #[_indexParam, headParam, tailParam] := consParams
+        | throwError "translateTplc: Vec.cons alternative has the wrong number of fields"
+      let nilBranch ← translateCode ctx nilAlt.getCode
+      let consCtx := (ctx.bindTerm headParam.fvarId).bindTerm tailParam.fvarId
+      let consBody ← translateCode consCtx consCode
+      let headTy ← translateTy ctx headParam.type
+      let tailTy ← translateTy ctx tailParam.type
+      let consBranch := Tplc.Term.lamAbs headTy (.lamAbs tailTy consBody)
+      let resultTy ← translateTy ctx cases.resultType
+      let scrutinee := Tplc.Term.unwrap (.var (← ctx.lookupTerm cases.discr))
       return .case resultTy scrutinee [nilBranch, consBranch]
     else
       throwError "translateTplc: cases on {cases.typeName} not yet handled (out of fragment)"
