@@ -1,4 +1,4 @@
-# Poe (proof of concept)
+# lean2plc (proof of concept)
 
 Contracts in a ghost-dependent fragment of Lean 4, compiled via LCNF to two
 backends: untyped UPLC (`Poe.Translate`) and Typed Plutus Core
