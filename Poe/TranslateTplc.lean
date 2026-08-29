@@ -347,6 +347,14 @@ partial def translateTy (ctx : Ctx) : Expr → CoreM Tplc.Ty
       return .builtin .bool
     else if e.isAppOfArity ``List 1 then
       return listTy (← translateTy ctx e.appArg!)
+    -- `{x : α // p x}` erases to exactly `α`'s own representation — `p`'s
+    -- own argument is already `lcErased` by base phase (confirmed
+    -- directly: `vlength`'s `v : Subtype (List X) lcErased`), matching
+    -- `Subtype.mk`'s runtime shape once its `Prop`-sorted `property`
+    -- field is dropped: there's no wrapper left at all, just the
+    -- carrier value.
+    else if e.isAppOfArity ``Subtype 2 then
+      translateTy ctx e.getAppArgs[0]!
     else
       throwError "translateTplc: unsupported type expression {e} (out of fragment)"
 
@@ -491,16 +499,26 @@ partial def translateConstCall (ctx : Ctx) (declName : Name) (args : Array Arg) 
         let callee ← translate declName
         applyArgsTplc ctx callee args
 
-/-- Other `LetValue` shapes (projections, non-self local application)
-    aren't needed by the examples so far, same restriction as
-    `Poe.Translate.translateLetValue`. -/
+/-- Other `LetValue` shapes (non-self local application) aren't needed by
+    the examples so far, same restriction as `Poe.Translate.translateLetValue`.
+    `.proj Subtype 0 struct` (`.val`) is the one projection that *is*
+    needed — `Subtype.mk`'s `Prop`-sorted `property` field (index 1)
+    already carries no runtime content, so the whole structure erases to
+    exactly its `val`, and projecting it back out is the identity on
+    whatever `struct` already compiled to (matching `translateTy`'s own
+    `Subtype` case, which drops the wrapper the same way). A `.proj` on
+    `property` itself would mean a `Prop` value reached a computation
+    position, which shouldn't happen in valid fragment code — no example
+    needs it, so it's left as a clear error rather than guessed at. -/
 partial def translateLetValue (ctx : Ctx) : LetValue → CoreM Tplc.Term
   | .const declName _us args => translateConstCall ctx declName args
   | .lit (.nat n) => return .constant (.integer (Int.ofNat n))
   | .lit (.str s) => return .constant (.string s)
   | .lit .. => throwError "translateTplc: only Nat/String literals are handled so far"
   | .fvar .. => throwError "translateTplc: local (non-self) application not yet handled"
-  | .proj .. => throwError "translateTplc: projections not yet handled"
+  | .proj ``Subtype 0 struct => return .var (← ctx.lookupTerm struct)
+  | .proj typeName idx _ =>
+    throwError "translateTplc: projection {idx} of {typeName} not yet handled (out of fragment)"
   | .erased => throwError "translateTplc: erased let-value reached D1 (out of fragment)"
 
 /-- `let`/`return`/`unreach`, plus `cases` on `Bool` (see file doc comment

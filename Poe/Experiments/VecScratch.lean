@@ -2,6 +2,8 @@ import Poe.Translate
 import Poe.Emit
 import Poe.Examples.First
 import Poe.Bridge
+import Poe.TranslateTplc
+import Poe.TplcOracle
 
 /-!
 Scratch, not a permanent example: exploring what a "Girard-erasure of a
@@ -29,6 +31,21 @@ def vHead {α : Type} {n : Nat} (v : {l : List α // l.length = n + 1}) : α :=
 #eval show Lean.CoreM Unit from do
   let t ← Poe.Translate.translate ``Poe.Examples.head
   IO.println (Poe.Emit.emit t)
+
+/- `vHead` genuinely compiles and evaluates correctly through the typed
+    backend, `n` and all — real evidence `Poe.TranslateTplc.translateTy`'s
+    `Subtype` case (erasing `{l : List α // l.length = n + 1}` down to
+    `listTy α`) and `translateLetValue`'s `Subtype.val` projection
+    (the identity on `struct` itself) aren't just accepted structurally,
+    checked against the real `plc` binary. -/
+#eval show Lean.CoreM Unit from do
+  let f ← Poe.TranslateTplc.translate ``vHead
+  let applied := Poe.Tplc.Term.apply
+    (Poe.Tplc.Term.apply (Poe.Tplc.Term.tyInst f (.builtin .integer)) (.constant (.integer 2)))
+    (Poe.TplcOracle.encodeIntList [7, 8, 9])
+  let program := Poe.EmitTplc.emit applied
+  let _ ← Poe.TplcOracle.runPlcTypecheck program
+  IO.println s!"vHead [7,8,9]: {← Poe.TplcOracle.runPlcEvaluate program}"
 
 /-!
 ## A provable, minimal instance of the same phenomenon
@@ -463,6 +480,20 @@ def vlength {X : Type} {n : Nat} (v : {l : List X // l.length = n}) : Nat := n
 
 #eval Poe.Translate.dumpMonoLCNF ``vlength
 
+/- `n` comes back unchanged regardless of the list handed in — genuinely
+    forced, not just dead: `List.length` is never actually recomputed at
+    runtime (unlike `getTag` below, whose whole point is the value being
+    read *is* already the stored index), the caller's own `n` is simply
+    returned. Checked through the typed backend against real `plc`. -/
+#eval show Lean.CoreM Unit from do
+  let f ← Poe.TranslateTplc.translate ``vlength
+  let applied := Poe.Tplc.Term.apply
+    (Poe.Tplc.Term.apply (Poe.Tplc.Term.tyInst f (.builtin .integer)) (.constant (.integer 3)))
+    (Poe.TplcOracle.encodeIntList [10, 20, 30])
+  let program := Poe.EmitTplc.emit applied
+  let _ ← Poe.TplcOracle.runPlcTypecheck program
+  IO.println s!"vlength [10,20,30] (n=3): {← Poe.TplcOracle.runPlcEvaluate program}"
+
 /-- A *cheap* forcing example: `tag` is literally stored as `Data.constr`'s
     own first field, so recovering it is a free O(1) projection — pattern-
     match `d.1`'s outer constructor and read the field — not a real
@@ -473,5 +504,19 @@ def isTaggedData (tag : Nat) (d : Poe.PlutusData.Data) : Prop :=
 def getTag {tag : Nat} (d : {d : Poe.PlutusData.Data // isTaggedData tag d}) : Nat := tag
 
 #eval Poe.Translate.dumpMonoLCNF ``getTag
+
+/- No type-former param at all (`tag : Nat`, not `Type`), so unlike
+    `vlength`/`vHead` this compiles to a plain two-argument function —
+    real evidence the `Subtype` fix handles a bare (non-`List`) carrier
+    type too (`{d : Data // isTaggedData tag d}` erases to `Data` itself,
+    not `listTy _`). -/
+#eval show Lean.CoreM Unit from do
+  let f ← Poe.TranslateTplc.translate ``getTag
+  let applied := Poe.Tplc.Term.apply
+    (Poe.Tplc.Term.apply f (.constant (.integer 5)))
+    (.constant (.data (.b "x".toUTF8)))
+  let program := Poe.EmitTplc.emit applied
+  let _ ← Poe.TplcOracle.runPlcTypecheck program
+  IO.println s!"getTag (tag=5): {← Poe.TplcOracle.runPlcEvaluate program}"
 
 end Poe.Experiments.VecScratch
