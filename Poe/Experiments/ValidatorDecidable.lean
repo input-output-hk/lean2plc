@@ -24,14 +24,17 @@ open Poe.PlutusData (Data)
 open Poe.Examples.HelloWorld (WellFormed decodeMessage decodeSignatories decodeOwner)
 open Poe.Lib.DataDecoding (elemBytes elemBytes_iff)
 
-/-- Registered once, globally, rather than a local `have` at each call
-    site — lets `Decidable (P ∧ Q)` (and anything else built from `=`/`∈`
-    on `ByteArray`) resolve automatically via `And`'s own existing
-    instance, with no explicit wiring at the use site. -/
-instance : DecidableEq ByteArray := fun x y =>
+/-- Agda-style `_≟_`: a plain, named function lifting a boolean test to a
+    `Decidable` answer, called directly at the use site — not a global
+    typeclass instance found by search (no wider scope than the call
+    site itself, unlike registering `DecidableEq ByteArray`). -/
+def byteArrayDecEq (x y : ByteArray) : Decidable (x = y) :=
   decidable_of_iff (x == y) (Poe.Lib.DataDecoding.ByteArray.beq_iff_eq x y)
 
-instance (a : ByteArray) (l : List ByteArray) : Decidable (a ∈ l) :=
+@[inherit_doc byteArrayDecEq] infix:50 " ≟ " => byteArrayDecEq
+
+/-- Same idea, for list membership instead of equality. -/
+def elemDecidable (a : ByteArray) (l : List ByteArray) : Decidable (a ∈ l) :=
   decidable_of_iff (elemBytes a l) (elemBytes_iff a l)
 
 /-- Same role as `Poe.Prelude.check`, for a `Decidable`-valued answer
@@ -56,7 +59,7 @@ def validatorBDecidable (ctx : Data) (wf : WellFormed ctx) : Decidable (Accepted
     let message := decodeMessage redeemer wfRedeemer
     let signatories := decodeSignatories txInfo wfTxInfo
     let owner := decodeOwner scriptInfo wfScriptInfo
-    show Decidable (message = "Hello, World!".toUTF8 ∧ owner ∈ signatories) from inferInstance
+    @instDecidableAnd _ _ (message ≟ "Hello, World!".toUTF8) (elemDecidable owner signatories)
 
 def validatorEDecidable (ctx : Data) (wf : WellFormed ctx) : Unit :=
   checkDecidable (validatorBDecidable ctx wf)
