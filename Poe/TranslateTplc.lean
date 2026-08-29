@@ -467,6 +467,15 @@ partial def translateConstCall (ctx : Ctx) (declName : Name) (args : Array Arg) 
   -- not through `.cases` at all).
   | ``Bool.false, #[] => return .constant (.bool false)
   | ``Bool.true, #[] => return .constant (.bool true)
+  -- `Decidable.isFalse`/`Decidable.isTrue` each carry exactly one
+  -- `Prop`-sorted field (`¬p`/`p`), already dropped by the `args` filter
+  -- above — so, same as `Bool`'s own constructors, there's nothing left
+  -- to build once erased. Matches `translateCode`'s existing `.cases`
+  -- handling, which already treats `Decidable` cases identically to
+  -- `Bool` on the consuming side; this is the same collapse on the
+  -- constructing side.
+  | ``Decidable.isFalse, #[] => return .constant (.bool false)
+  | ``Decidable.isTrue, #[] => return .constant (.bool true)
   | ``PUnit.unit, #[] => return .constant .unit
   -- `Poe.PlutusData`'s accessors are opaque/self-recursive placeholder
   -- bodies (e.g. `field0 d := field0 d`) never meant to be translated
@@ -554,6 +563,29 @@ partial def translateCode (ctx : Ctx) : Code → CoreM Tplc.Term
     -- (untyped UPLC's `lam` carries no type annotation at all).
     return .apply (.lamAbs (← translateTy ctx decl.type) body) v
   | .return fvarId => return .var (← ctx.lookupTerm fvarId)
+  -- A join point is just a local (non-recursive, here — no example needs
+  -- a self-referencing one yet) function shared by multiple call sites —
+  -- `Decidable.rec`/`And.decidable`-shaped control flow generates these
+  -- for the common `isTrue`/`isFalse` continuation multiple branches jump
+  -- to, confirmed directly by dumping `validatorBDecidable`'s base LCNF.
+  -- Translated exactly like `.let` (`.apply (.lamAbs ty body) value`),
+  -- just with the bound value being a lambda instead of a computed term;
+  -- `.jmp` is then an ordinary application to it, via the same
+  -- `applyArgsTplc` every other call site uses.
+  | .jp decl k => do
+    let jpParams := decl.params.filter fun p => !p.type.isErased
+    let jpCtx := jpParams.foldl (init := ctx) (·.bindTerm ·.fvarId)
+    let jpBody ← translateCode jpCtx decl.value
+    let jpLam ← jpParams.foldrM (init := jpBody) fun p acc =>
+      return Tplc.Term.lamAbs (← translateTy ctx p.type) acc
+    -- `decl.type` is already the join point's own full curried function
+    -- type (`param → ... → result`), confirmed directly by dumping it —
+    -- not just the result type the way it first looked from the pretty
+    -- printer eliding params from the `: TYPE` annotation.
+    let jpTy ← translateTy ctx decl.type
+    let body ← translateCode (ctx.bindTerm decl.fvarId) k
+    return .apply (.lamAbs jpTy body) jpLam
+  | .jmp fvarId args => do applyArgsTplc ctx (.var (← ctx.lookupTerm fvarId)) args
   -- `Code.unreach` already carries its own result `Ty` (LCNF needs this
   -- to keep the surrounding code type-correct even though the branch is
   -- dead) — exactly the annotation `Tplc.Term.error` itself requires,
