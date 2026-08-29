@@ -258,4 +258,106 @@ theorem idList_self_related :
 
 #print axioms idList_self_related
 
+/-!
+## "No junk": *any* self-related value of `∀X. X → X` is the identity
+
+Every proof above only ever checks a *specific*, already-known-good
+closure against the relation — that's not yet the interesting half of
+Girard–Reynolds. The genuine content is the other direction: parametricity
+forces *every* inhabitant of `∀X. X → X`, however it was built, to behave
+like the identity — nothing exotic (a type-inspecting function, a
+divergent term masquerading as one) can satisfy the free theorem without
+actually being the identity. That's what rules out "junk" and makes the
+Church-style encoding a genuine isomorphism rather than just a plausible
+one.
+
+The classical Reynolds argument, and it goes through using only `R`
+itself — no separate "fundamental theorem of logical relations" needed:
+fix the `x` you want to check, and instantiate the free theorem's own
+`∀ R'` at the *singleton* relation `R' v w := v = x ∧ w = x`. -/
+
+/-- `iterate` treats `Halt` as an absorbing state (built into its own
+    definition, `| .Halt v, _ => .Halt v`), so two runs from the same
+    state that both reach `Halt` — however many steps each took — must
+    reach the *same* value: extend the shorter run by `iterate_add` and
+    it's still sitting at the same `Halt`. -/
+theorem iterate_halt_unique (sv : PlutusCore.Default.Internal.BuiltinSemanticsVariant)
+    (Sigma : State) (n m : Nat) (v w : CekValue)
+    (hn : iterate sv Sigma n = State.Halt v) (hm : iterate sv Sigma m = State.Halt w) :
+    v = w := by
+  rcases Nat.le_total n m with h | h
+  · obtain ⟨k, hk⟩ := Nat.le.dest h
+    rw [← hk, iterate_add, hn] at hm
+    simp only [iterate] at hm
+    injection hm with hm'
+  · obtain ⟨k, hk⟩ := Nat.le.dest h
+    rw [← hk, iterate_add, hm] at hn
+    simp only [iterate] at hn
+    injection hn with hn'
+    exact hn'.symm
+
+theorem no_junk {f : CekValue}
+    (hf : R (.forall_ .type (.fn (.var 0) (.var 0))) [] f f) (x : CekValue) :
+    ∃ n k body, iterate default (forceValue f) n = State.Halt body ∧
+      iterate default (applyValue body x) k = State.Halt x := by
+  simp only [R] at hf
+  obtain ⟨n, m, body, body', hforce1, hforce2, hfn⟩ := hf (fun v w => v = x ∧ w = x)
+  have hbody : body = body' := iterate_halt_unique default (forceValue f) n m body body' hforce1 hforce2
+  subst hbody
+  simp only [List.get?] at hfn
+  obtain ⟨n', m', fx, gx, happ1, _, hxx⟩ := hfn x x ⟨rfl, rfl⟩
+  obtain ⟨hfx, -⟩ := hxx
+  subst hfx
+  exact ⟨n, n', body, hforce1, happ1⟩
+
+#print axioms no_junk
+
+/-- Sanity check: `no_junk`, applied to `genericId` itself, gives back
+    exactly what `applyValue_id` already knew directly — confirming
+    `no_junk` isn't vacuous, it genuinely reconstructs known behavior
+    from nothing but the free-theorem hypothesis. -/
+example (x : CekValue) :
+    ∃ n k body, iterate default (forceValue genericIdValue) n = State.Halt body ∧
+      iterate default (applyValue body x) k = State.Halt x :=
+  no_junk genericId_self_related x
+
+/-!
+## Does the compiler translation preserve `List`? — the concrete instance
+
+The genuinely datatype-flavored question: not "the Church encoding of
+`List` has no junk" (moot — nothing in Poe ever produces one), but "does
+`idList`'s *real, compiled* TPLC closure, applied to a *genuinely encoded
+Lean list*, actually give the same list back" — a direct link between
+Lean's source-level `List Int` and Poe's compiled `CekValue`
+representation of it, via `Poe.Experiments.VecScratch.encodeIntListValue`.
+
+A first attempt hardcoded `Int` as the element type — but that's not the
+genuinely polymorphic statement at all, just `idList` monomorphized once.
+`idList`'s compiled closure is *erased*: no branching on the element type
+anywhere in it, and `applyValue_id` never mentions `Int` either — so the
+real, `∀X`-quantified statement should cost nothing extra. `encodeListValue`
+generalizes `Poe.Experiments.VecScratch.encodeIntListValue` to an
+arbitrary element type and an arbitrary per-element encoder; the round-trip
+theorem is then genuinely universal, not fixed at one instantiation. -/
+def encodeListValue {α : Type} (encodeElem : α → CekValue) : List α → CekValue
+  | [] => .VConstr 0 []
+  | x :: xs => .VConstr 1 [encodeElem x, encodeListValue encodeElem xs]
+
+theorem idList_roundtrip {α : Type} (encodeElem : α → CekValue) (xs : List α) :
+    ∃ n k, iterate default (forceValue genericIdValue) n = State.Halt (.VLam "x" (Term.Term.Var 0) []) ∧
+      iterate default (applyValue (.VLam "x" (Term.Term.Var 0) []) (encodeListValue encodeElem xs)) k
+        = State.Halt (encodeListValue encodeElem xs) :=
+  ⟨3, 3, force_genericId, applyValue_id (encodeListValue encodeElem xs)⟩
+
+#print axioms idList_roundtrip
+
+/-- The earlier `Int`-specific claim is just one instantiation of the
+    real, polymorphic one — `encodeIntListValue` is `encodeListValue` with
+    `encodeElem := fun i => .VCon (.Integer i)`. -/
+example (xs : List Int) :
+    encodeListValue (fun i => CekValue.VCon (.Integer i)) xs = encodeIntListValue xs := by
+  induction xs with
+  | nil => rfl
+  | cons x xs ih => simp [encodeListValue, encodeIntListValue, ih]
+
 end Poe.Experiments.RelScratch
