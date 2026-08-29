@@ -37,6 +37,17 @@ def byteArrayDecEq (x y : ByteArray) : Decidable (x = y) :=
 def elemDecidable (a : ByteArray) (l : List ByteArray) : Decidable (a ∈ l) :=
   decidable_of_iff (elemBytes a l) (elemBytes_iff a l)
 
+/-- Agda's `_×-dec_`: lift `∧` to `Decidable`, hand-written rather than
+    borrowed from `instDecidableAnd`'s own typeclass machinery (even
+    called explicitly via `@`, that's still routing through instance
+    infrastructure for what's really just a 4-case match). -/
+def decidableAnd {P Q : Prop} : Decidable P → Decidable Q → Decidable (P ∧ Q)
+  | isTrue hp, isTrue hq => isTrue ⟨hp, hq⟩
+  | isTrue _, isFalse hq => isFalse (hq ∘ And.right)
+  | isFalse hp, _ => isFalse (hp ∘ And.left)
+
+@[inherit_doc decidableAnd] infixr:35 " ×-dec " => decidableAnd
+
 /-- Same role as `Poe.Prelude.check`, for a `Decidable`-valued answer
     instead of a `Bool` one: `isTrue` succeeds, `isFalse` aborts. -/
 def checkDecidable {P : Prop} : Decidable P → Unit
@@ -59,7 +70,7 @@ def validatorBDecidable (ctx : Data) (wf : WellFormed ctx) : Decidable (Accepted
     let message := decodeMessage redeemer wfRedeemer
     let signatories := decodeSignatories txInfo wfTxInfo
     let owner := decodeOwner scriptInfo wfScriptInfo
-    @instDecidableAnd _ _ (message ≟ "Hello, World!".toUTF8) (elemDecidable owner signatories)
+    (message ≟ "Hello, World!".toUTF8) ×-dec elemDecidable owner signatories
 
 def validatorEDecidable (ctx : Data) (wf : WellFormed ctx) : Unit :=
   checkDecidable (validatorBDecidable ctx wf)
