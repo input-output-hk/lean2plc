@@ -24,6 +24,22 @@ open Poe.PlutusData (Data)
 open Poe.Examples.HelloWorld (WellFormed decodeMessage decodeSignatories decodeOwner)
 open Poe.Lib.DataDecoding (elemBytes elemBytes_iff)
 
+/-- Registered once, globally, rather than a local `have` at each call
+    site — lets `Decidable (P ∧ Q)` (and anything else built from `=`/`∈`
+    on `ByteArray`) resolve automatically via `And`'s own existing
+    instance, with no explicit wiring at the use site. -/
+instance : DecidableEq ByteArray := fun x y =>
+  decidable_of_iff (x == y) (Poe.Lib.DataDecoding.ByteArray.beq_iff_eq x y)
+
+instance (a : ByteArray) (l : List ByteArray) : Decidable (a ∈ l) :=
+  decidable_of_iff (elemBytes a l) (elemBytes_iff a l)
+
+/-- Same role as `Poe.Prelude.check`, for a `Decidable`-valued answer
+    instead of a `Bool` one: `isTrue` succeeds, `isFalse` aborts. -/
+def checkDecidable {P : Prop} : Decidable P → Unit
+  | isTrue _ => ()
+  | isFalse _ => Poe.Prelude.abort ()
+
 /-- The proposition `validatorB`'s `Bool` answer is only ever a stand-in
     for — same content as `HelloWorldCorrect.validatorB_correct`'s right
     side, just given a name here instead of stated as a theorem after
@@ -40,16 +56,9 @@ def validatorBDecidable (ctx : Data) (wf : WellFormed ctx) : Decidable (Accepted
     let message := decodeMessage redeemer wfRedeemer
     let signatories := decodeSignatories txInfo wfTxInfo
     let owner := decodeOwner scriptInfo wfScriptInfo
-    have heq : Decidable (message = "Hello, World!".toUTF8) :=
-      decidable_of_iff (message == "Hello, World!".toUTF8) (Poe.Lib.DataDecoding.ByteArray.beq_iff_eq _ _)
-    have hmem : Decidable (owner ∈ signatories) :=
-      decidable_of_iff (elemBytes owner signatories) (elemBytes_iff _ _)
-    show Decidable (message = "Hello, World!".toUTF8 ∧ owner ∈ signatories) from
-      @instDecidableAnd _ _ heq hmem
+    show Decidable (message = "Hello, World!".toUTF8 ∧ owner ∈ signatories) from inferInstance
 
 def validatorEDecidable (ctx : Data) (wf : WellFormed ctx) : Unit :=
-  match validatorBDecidable ctx wf with
-  | isTrue _ => ()
-  | isFalse _ => Poe.Prelude.abort ()
+  checkDecidable (validatorBDecidable ctx wf)
 
 end Poe.Experiments.ValidatorDecidable
