@@ -1,103 +1,206 @@
+import Poe.PlutusData
+import Poe.Lib.DataDecoding
+import Poe.Prelude
 import Poe.Examples.HelloWorld
 import Poe.Examples.HelloWorldCorrect
 import Poe.Experiments.ValidatorDecidable
 import Poe.Experiments.HelloWorldSubtype
-import Poe.Experiments.VecScratch
 
 /-!
-# The validator styles, side by side
+# The validator styles, side by side — same business logic, different packaging.
 
-Every style below enforces the *same* business logic — Aiken's
-`hello_world`: the redeemer's message must be exactly `"Hello, World!"`,
-and the datum's `owner` must be among the transaction's `signatories`.
-What differs is only how the well-formedness precondition and the
-correctness postcondition get packaged into the validator's own type.
+Self-contained: every definition needed to *read* this file is restated
+here, not just imported. The imports of the canonical originals above are
+kept only to support the `example ... := rfl` (or, for the one theorem,
+direct-reuse) checks below each style, which guard against silent drift —
+nothing in the styles themselves relies on opening those modules.
 
-No new logic lives in this file — every definition below is a `#check`
-into an already-built, already oracle-verified artifact:
-`Poe.Examples.HelloWorld`, `Poe.Examples.HelloWorldCorrect`,
-`Poe.Experiments.ValidatorDecidable`, `Poe.Experiments.HelloWorldSubtype`,
-`Poe.Experiments.VecScratch`. This file exists only to lay them out
-together for comparison — build it and read the `#check` output for each
-signature, or open the source file named in each comment for the actual
-definition and its oracle tests.
+For reference, the original this whole file is modeled on — Aiken's own
+`hello_world` example (`aiken-lang/aiken`, `examples/hello_world/validators/hello_world.ak`):
+
+```
+use aiken/collection/list
+use aiken/crypto.{VerificationKeyHash}
+use cardano/transaction.{OutputReference, Transaction}
+
+pub type Datum {
+  owner: VerificationKeyHash,
+}
+
+pub type Redeemer {
+  msg: ByteArray,
+}
+
+validator hello_world {
+  spend(
+    datum: Option<Datum>,
+    redeemer: Redeemer,
+    _: OutputReference,
+    transaction: Transaction,
+  ) {
+    let must_say_hello = redeemer.msg == "Hello, World!"
+
+    expect Some(Datum { owner }) = datum
+
+    let must_be_signed = list.has(transaction.extra_signatories, owner)
+
+    must_say_hello && must_be_signed
+  }
+
+  else(_) {
+    fail
+  }
+}
+```
 -/
 
 namespace Poe.Experiments.ValidatorStyles
 
-/-! ## 1. Plain `Bool`, precondition curried in separately
+open Poe.PlutusData (Data decodeByteStringList IsByteStringList)
+open Poe.Lib.DataDecoding (elemBytes elemBytes_iff ByteArray.beq_iff_eq)
 
-The flagship style (`Poe/Examples/HelloWorld.lean`). `wf : WellFormed ctx`
-is an ordinary curried argument — this is already dependently typed
-(`WellFormed`'s very statement depends on the value `ctx`), just with the
-dependency confined to the *input* side. Nothing in the *output* type
-(`Bool`) reflects what was decided; if you want to know `validatorB`
-actually enforces the intended spec, you look elsewhere. -/
+-- Shared shape predicates and decoders every style below builds on.
+def RedeemerOk (redeemer : Data) : Prop :=
+  match redeemer with
+  | .constr _ [.b _] => True
+  | _ => False
 
-#check @Poe.Examples.HelloWorld.WellFormed
-#check @Poe.Examples.HelloWorld.validatorB
+def decodeMessage : ∀ redeemer, RedeemerOk redeemer → ByteArray
+  | .constr _ [.b msgBytes], _ => msgBytes
 
-/-! ## 2. Plain `Bool`, correctness proven afterward as a separate theorem
+def TxInfoOk (txInfo : Data) : Prop :=
+  match txInfo with
+  | .constr _ (_ :: _ :: _ :: _ :: _ :: _ :: _ :: _ :: sigListData :: _) => IsByteStringList sigListData
+  | _ => False
 
-Same `validatorB` as style 1 — the *only* difference is a second,
-independently-stated-and-proved artifact (`Poe/Examples/HelloWorldCorrect.lean`)
-connecting the `Bool` result back to the abstract spec. Two maintained
-artifacts, not one: if `validatorB`'s body changes, this theorem needs
-re-proving by hand. Lean's type checker catches any drift immediately
-(the theorem simply fails to compile) — it's a maintenance cost, not a
-soundness risk. -/
+def decodeSignatories : ∀ txInfo, TxInfoOk txInfo → List ByteArray
+  | .constr _ (_ :: _ :: _ :: _ :: _ :: _ :: _ :: _ :: sigListData :: _), h => decodeByteStringList sigListData h
 
-#check @Poe.Examples.HelloWorld.validatorB_correct
+def ScriptInfoOk (scriptInfo : Data) : Prop :=
+  match scriptInfo with
+  | .constr _ [_, .constr _ [.constr _ [.b _]]] => True
+  | _ => False
 
-/-! ## 3. `Decidable`-valued
+def decodeOwner : ∀ scriptInfo, ScriptInfoOk scriptInfo → ByteArray
+  | .constr _ [_, .constr _ [.constr _ [.b ownerBytes]]], _ => ownerBytes
 
-`Poe/Experiments/ValidatorDecidable.lean`. `Accepted` names the same
-proposition `validatorB_correct` states on its right-hand side — given a
-name up front instead of discovered after the fact. Returning
-`isTrue`/`isFalse` at all is only possible by actually producing a proof
-of `Accepted`/`¬Accepted`, so "the answer matches the spec" is enforced by
-the type checker at the point of construction, not proved afterward as in
-style 2. -/
+def WellFormed (ctx : Data) : Prop :=
+  match ctx with
+  | .constr 0 [txInfo, redeemer, scriptInfo] => TxInfoOk txInfo ∧ RedeemerOk redeemer ∧ ScriptInfoOk scriptInfo
+  | _ => False
 
-#check @Poe.Experiments.ValidatorDecidable.Accepted
-#check @Poe.Experiments.ValidatorDecidable.validatorBDecidable
+example : WellFormed = Poe.Examples.HelloWorld.WellFormed := rfl
 
-/-! ## 4. `Subtype`-bundled precondition (input only)
+-- 1. Plain `Bool`, precondition curried in as a separate argument.
+def style1 (ctx : Data) (wf : WellFormed ctx) : Bool :=
+  match ctx, wf with
+  | .constr 0 [txInfo, redeemer, scriptInfo], ⟨wfTxInfo, wfRedeemer, wfScriptInfo⟩ =>
+    let message := decodeMessage redeemer wfRedeemer
+    let signatories := decodeSignatories txInfo wfTxInfo
+    let owner := decodeOwner scriptInfo wfScriptInfo
+    message == "Hello, World!".toUTF8 && elemBytes owner signatories
 
-`Poe/Experiments/HelloWorldSubtype.lean`. Same body as `validatorB`, but
-`ctx`/`wf` are bundled into one `{ctx : Data // WellFormed ctx}` argument
-instead of curried separately — a stylistic repackaging of style 1's
-*input* side, no change to what's decided or how it's proven. -/
+example : style1 = Poe.Examples.HelloWorld.validatorB := rfl
 
-#check @Poe.Experiments.HelloWorldSubtype.validatorBSubtype
+-- The deployable shape every real validator actually needs: `()` on success, `error` otherwise
+-- (a ledger never compares a script's result against `True` — it just needs the script to not
+-- throw). `Poe.Prelude.check`/`abort` are genuine shared infrastructure (like `Data`/`ByteArray`
+-- above), not "a style" of their own, so they stay a library import rather than being restated.
+def style1E (ctx : Data) (wf : WellFormed ctx) : Unit := Poe.Prelude.check (style1 ctx wf)
 
-/-! ## 5. `Subtype`-bundled pre *and* post condition (Hoare-triple style)
+example : style1E = Poe.Examples.HelloWorld.validatorE := rfl
 
-Also `Poe/Experiments/HelloWorldSubtype.lean`. The fullest packaging: the
-*input* carries its precondition (`WellFormed`, as in style 4) and the
-*output* carries its own postcondition (`b = true ↔ Accepted v.1 v.2`,
-reusing `Accepted` from style 3 rather than restating it) in the same
-definition. This and style 3 are the same content in different
-encodings — a tag plus a proof it reflects the spec — not two different
-ideas; style 3 curries the input, style 5 bundles it, but both carry
-exactly as much proof obligation as each other. -/
+-- 2. Plain `Bool`, correctness proven afterward as a separate theorem (two maintained artifacts).
+def mkCtxData (txInfo : Data) (messageBytes owner : ByteArray) : Data :=
+  .constr 0
+    [ txInfo
+    , .constr 0 [.b messageBytes]
+    , .constr 1 [.b (ByteArray.mk #[]), .constr 0 [.constr 0 [.b owner]]] ]
 
-#check @Poe.Experiments.HelloWorldSubtype.validatorBSubtypePost
+-- Proved by direct reuse of the canonical theorem, not reproved from scratch — so if that
+-- theorem's own proof ever breaks, this restatement fails to compile too, same drift guard as
+-- every other style's `rfl` check.
+theorem style1_correct
+    (txInfo : Data) (signatories : List ByteArray) (h : TxInfoOk txInfo)
+    (hsig : decodeSignatories txInfo h = signatories)
+    (messageBytes owner : ByteArray) :
+    style1 (mkCtxData txInfo messageBytes owner) ⟨h, trivial, trivial⟩ = true ↔
+      messageBytes = "Hello, World!".toUTF8 ∧ owner ∈ signatories :=
+  Poe.Examples.HelloWorld.validatorB_correct txInfo signatories h hsig messageBytes owner
 
-/-! ## 6. Genuinely dependent typing: an index carried *in* the type
+-- 3. `Decidable`-valued — producing `isTrue`/`isFalse` forces a proof at construction time.
+-- (Written as plain function application, not `≟`/`×-dec` infix notation — that notation is
+-- already declared globally by `Poe.Experiments.ValidatorDecidable`, and redeclaring it here
+-- for these local synonyms would just be ambiguous, not self-contained.)
+def byteArrayDecEq (x y : ByteArray) : Decidable (x = y) :=
+  decidable_of_iff (x == y) (ByteArray.beq_iff_eq x y)
 
-`Poe/Experiments/VecScratch.lean`. A different kind of dependency than
-styles 1-5 — not a precondition or postcondition *attached to* a
-`Data`/`Bool`, but a real inductive family (`Vec X n`) whose type itself
-varies with a value (`n`, the length). Not a HelloWorld-shaped validator
-at all (an earlier attempt at a `Vec`-based signatories decode for
-*this* validator was tried and dropped as too tenuous a fit) — included
-here purely to contrast *what kind* of dependent typing this is against
-styles 1-5's precondition/postcondition style. `vecHead`'s own index `n`
-carries no runtime content and erases entirely (see `Poe.TranslateTplc`'s
-`Vec` handling and the erasure-completeness note in `VecScratch.lean`). -/
+def elemDecidable (a : ByteArray) (l : List ByteArray) : Decidable (a ∈ l) :=
+  decidable_of_iff (elemBytes a l) (elemBytes_iff a l)
 
-#check @Poe.Experiments.VecScratch.Vec
-#check @Poe.Experiments.VecScratch.vecHead
+def decidableAnd {P Q : Prop} : Decidable P → Decidable Q → Decidable (P ∧ Q)
+  | isTrue hp, isTrue hq => isTrue ⟨hp, hq⟩
+  | isTrue _, isFalse hq => isFalse (hq ∘ And.right)
+  | isFalse hp, _ => isFalse (hp ∘ And.left)
+
+def Accepted (ctx : Data) (wf : WellFormed ctx) : Prop :=
+  match ctx, wf with
+  | .constr 0 [txInfo, redeemer, scriptInfo], ⟨wfTxInfo, wfRedeemer, wfScriptInfo⟩ =>
+    decodeMessage redeemer wfRedeemer = "Hello, World!".toUTF8 ∧
+      decodeOwner scriptInfo wfScriptInfo ∈ decodeSignatories txInfo wfTxInfo
+
+example : @Accepted = Poe.Experiments.ValidatorDecidable.Accepted := rfl
+
+def style3 (ctx : Data) (wf : WellFormed ctx) : Decidable (Accepted ctx wf) :=
+  match ctx, wf with
+  | .constr 0 [txInfo, redeemer, scriptInfo], ⟨wfTxInfo, wfRedeemer, wfScriptInfo⟩ =>
+    let message := decodeMessage redeemer wfRedeemer
+    let signatories := decodeSignatories txInfo wfTxInfo
+    let owner := decodeOwner scriptInfo wfScriptInfo
+    -- reads, with the notation this file doesn't redeclare, as:
+    --   (message ≟ "Hello, World!".toUTF8) ×-dec elemDecidable owner signatories
+    decidableAnd (byteArrayDecEq message "Hello, World!".toUTF8) (elemDecidable owner signatories)
+
+example : style3 = Poe.Experiments.ValidatorDecidable.validatorBDecidable := rfl
+
+def checkDecidable {P : Prop} : Decidable P → Unit
+  | isTrue _ => ()
+  | isFalse _ => Poe.Prelude.abort ()
+
+def style3E (ctx : Data) (wf : WellFormed ctx) : Unit := checkDecidable (style3 ctx wf)
+
+example : style3E = Poe.Experiments.ValidatorDecidable.validatorEDecidable := rfl
+
+-- 4. `Subtype`-bundled precondition — `ctx`/`wf` packaged into one argument instead of curried.
+def style4 (v : {ctx : Data // WellFormed ctx}) : Bool :=
+  match v.1, v.2 with
+  | .constr 0 [txInfo, redeemer, scriptInfo], ⟨wfTxInfo, wfRedeemer, wfScriptInfo⟩ =>
+    let message := decodeMessage redeemer wfRedeemer
+    let signatories := decodeSignatories txInfo wfTxInfo
+    let owner := decodeOwner scriptInfo wfScriptInfo
+    message == "Hello, World!".toUTF8 && elemBytes owner signatories
+
+example : style4 = Poe.Experiments.HelloWorldSubtype.validatorBSubtype := rfl
+
+-- No canonical original exists for this one to check against — `HelloWorldSubtype.lean` never
+-- wrote a check-wrapped version of `validatorBSubtype`, so this is new, not a restatement.
+def style4E (v : {ctx : Data // WellFormed ctx}) : Unit := Poe.Prelude.check (style4 v)
+
+-- 5. `Subtype`-bundled pre *and* post condition — the full Hoare-triple packaging.
+def style5 (v : {ctx : Data // WellFormed ctx}) : {b : Bool // b = true ↔ Accepted v.1 v.2} :=
+  match v.1, v.2 with
+  | .constr 0 [txInfo, redeemer, scriptInfo], ⟨wfTxInfo, wfRedeemer, wfScriptInfo⟩ =>
+    let message := decodeMessage redeemer wfRedeemer
+    let signatories := decodeSignatories txInfo wfTxInfo
+    let owner := decodeOwner scriptInfo wfScriptInfo
+    ⟨message == "Hello, World!".toUTF8 && elemBytes owner signatories, by
+      simp only [Accepted, message, signatories, owner]
+      simp [ByteArray.beq_iff_eq, elemBytes_iff]⟩
+
+example : style5 = Poe.Experiments.HelloWorldSubtype.validatorBSubtypePost := rfl
+
+-- Same as `style4E`: new, not a restatement of an existing artifact — takes `.val` since
+-- `style5`'s postcondition proof is exactly as `Prop`-erased as `Accepted` itself.
+def style5E (v : {ctx : Data // WellFormed ctx}) : Unit := Poe.Prelude.check (style5 v).val
 
 end Poe.Experiments.ValidatorStyles
