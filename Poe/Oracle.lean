@@ -24,6 +24,34 @@ def runUplc (program : String) : IO String := do
   let out ← IO.Process.run { cmd := "uplc", args := #["evaluate"] } (some program)
   return out.trim
 
+/-- The real, on-chain-relevant size metric for `program` (already-emitted
+    textual UPLC): flat-encoded byte count, via the actual `uplc convert`
+    tool — not hand-measured, not reimplemented. Goes via temp files
+    rather than piping through `IO.Process.run`'s `String`-typed stdout,
+    since flat encoding is raw binary and a `String` capture risks
+    mangling non-UTF8 byte sequences (`convert` does support
+    `--stdin`/`--stdout`, but only `evaluate`'s text-in/text-out shape is
+    safe to pipe that way). -/
+def flatSize (program : String) : IO Nat := do
+  let tmpIn := "/tmp/poe_oracle_flatSize_in.uplc"
+  let tmpOut := "/tmp/poe_oracle_flatSize_out.flat"
+  IO.FS.writeFile tmpIn program
+  let out ← IO.Process.output
+    { cmd := "uplc", args := #["convert", "--if", "textual", "--of", "flat", "-i", tmpIn, "-o", tmpOut] }
+  if out.exitCode != 0 then
+    throw (IO.userError s!"uplc convert failed: {out.stderr}")
+  let bytes ← IO.FS.readBinFile tmpOut
+  return bytes.size
+
+/-- `flatSize`'s own input is `declName` applied to no arguments — for a
+    validator whose translated shape doesn't depend on which argument
+    values it's later applied to (true of every `Poe.Translate` output:
+    application only ever adds `.app` nodes around the same translated
+    function term), this is the size that matters. -/
+def sizeOf (declName : Name) : CoreM Nat := do
+  let f ← Translate.translate declName
+  flatSize (emit f)
+
 def encodeInt (i : Int) : Uplc.Term :=
   .const (.integer i)
 
