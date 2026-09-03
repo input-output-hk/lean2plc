@@ -216,6 +216,10 @@ def builtinTable : List (Name × Uplc.Builtin) :=
   -- safe to translate this way — this entry is only sound for the
   -- literal-pattern-matching use case, not `Nat` subtraction in general.
   , (``Nat.sub, .subtractInteger)
+  -- Unlike `Nat.sub` above, `Nat.add` has no truncation edge case at all
+  -- (`Nat` addition never needs to clamp), so this is sound unconditionally,
+  -- not just for one narrow generated-code shape.
+  , (``Nat.add, .addInteger)
   ]
 
 def applyArgs (f : Uplc.Term) (args : List Uplc.Term) : Uplc.Term :=

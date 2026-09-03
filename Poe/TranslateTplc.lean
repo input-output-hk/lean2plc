@@ -185,6 +185,14 @@ def listTy (elemTy : Tplc.Ty) : Tplc.Ty :=
 def listUnrolledSop (elemTy : Tplc.Ty) : Tplc.Ty :=
   .sop [[], [elemTy, listTy elemTy]]
 
+/-- `Option elemTy`'s own `Ty` — unlike `List`/`Vec`, `Option` isn't
+    recursive at all (`some`'s field is just `elemTy`, never `Option
+    elemTy` again), so this is a plain `sop`, no `ifix`/`iwrap`/`unwrap`
+    anywhere. `none` first (0 fields), `some` second (1 field), matching
+    `Option`'s own declaration order. -/
+def optionSop (elemTy : Tplc.Ty) : Tplc.Ty :=
+  .sop [[], [elemTy]]
+
 /-!
 ## `Data`-record accessors: `constrTag`/`field0`–`field8`
 
@@ -363,6 +371,18 @@ partial def translateTy (ctx : Ctx) : Expr → CoreM Tplc.Ty
     -- fresh, indexed pattern functor.
     else if e.isAppOfArity `Poe.Experiments.VecScratch.Vec 2 then
       return listTy (← translateTy ctx e.getAppArgs[0]!)
+    -- `Fin n` (`structure Fin where val : Nat; isLt : val < n`) erases to
+    -- exactly `Nat`'s own representation — same shape as `Subtype` above
+    -- (one live field, one `Prop`-sorted field that drops out), confirmed
+    -- directly: `finToNat {n} (i : Fin n) : Nat := i.val` dumps to mono
+    -- LCNF as `return i` (the untyped backend already handles this for
+    -- free via its generic fallback; only the typed backend needs
+    -- `.val`'s projection spelled out, below).
+    else if e.isAppOfArity ``Fin 1 then
+      return .builtin .integer
+    -- Non-recursive, unlike `List`/`Vec` — see `optionSop`.
+    else if e.isAppOfArity ``Option 1 then
+      return optionSop (← translateTy ctx e.appArg!)
     else
       throwError "translateTplc: unsupported type expression {e} (out of fragment)"
 
@@ -375,6 +395,7 @@ def builtinTable : List (Name × Poe.Uplc.Builtin) :=
   , (``Int.decEq, .equalsInteger)
   , (``Poe.PlutusData.unBData, .unBData)
   , (``Int.fdiv, .divideInteger)
+  , (``Nat.add, .addInteger)
   ]
 
 /-- Apply `f` to `args` in order: a `.fvar` arg is an ordinary `Term.apply`,
@@ -487,6 +508,17 @@ partial def translateConstCall (ctx : Ctx) (declName : Name) (args : Array Arg) 
     let some val := args.toList.findSome? fun | .fvar fvarId => some fvarId | _ => none
       | throwError "translateTplc: Subtype.mk missing its value argument"
     return .var (← ctx.lookupTerm val)
+  -- `Fin.mk n val isLt` — `isLt` (`Prop`-sorted) is already dropped by the
+  -- erased-args filter, leaving `[n, val]` (confirmed directly: dumping
+  -- base LCNF for a real `Fin.mk` call gives `@Fin.mk _x.1 _x.2 ◾`, in
+  -- that order) — unlike `Subtype.mk`, both remaining args are ordinary
+  -- `.fvar`s (Fin's own `n` index is a plain `Nat`, not a `.type` arg), so
+  -- `val` has to be picked out positionally (the *last* one) rather than
+  -- found by shape the way `Subtype.mk` needed.
+  | ``Fin.mk, args =>
+    let some val := (args.toList.filterMap fun | .fvar fvarId => some fvarId | _ => none).getLast?
+      | throwError "translateTplc: Fin.mk missing its value argument"
+    return .var (← ctx.lookupTerm val)
   | ``PUnit.unit, #[] => return .constant .unit
   -- `Poe.PlutusData`'s accessors are opaque/self-recursive placeholder
   -- bodies (e.g. `field0 d := field0 d`) never meant to be translated
@@ -531,8 +563,18 @@ partial def translateConstCall (ctx : Ctx) (declName : Name) (args : Array Arg) 
           fun fvarId => return Tplc.Term.var (← ctx.lookupTerm fvarId)
         let fields := if declName == `Poe.Experiments.VecScratch.Vec.cons then allFields.drop 1 else allFields
         return .iwrap listPatFunctor elemTy (.constr (listUnrolledSop elemTy) info.cidx fields)
+      -- `Option.none`/`Option.some val` — no `iwrap` (see `optionSop`):
+      -- just a bare `Constr`, the element type recovered the same way as
+      -- `List`/`Vec` above.
+      else if info.induct == ``Option then
+        let some elemTyExpr := args.toList.findSome? fun | .type e => some e | _ => none
+          | throwError "translateTplc: {declName} missing its element-type argument"
+        let elemTy ← translateTy ctx elemTyExpr
+        let fields ← (args.toList.filterMap fun | .fvar fvarId => some fvarId | _ => none).mapM
+          fun fvarId => return Tplc.Term.var (← ctx.lookupTerm fvarId)
+        return .constr (optionSop elemTy) info.cidx fields
       else
-        throwError "translateTplc: constructors of {info.induct} not yet handled (only List/Vec, out of fragment)"
+        throwError "translateTplc: constructors of {info.induct} not yet handled (only List/Vec/Option, out of fragment)"
     else
       match builtinTable.lookup declName with
       | some b => applyArgsTplc ctx (.builtin b) args
@@ -558,6 +600,13 @@ partial def translateLetValue (ctx : Ctx) : LetValue → CoreM Tplc.Term
   | .lit .. => throwError "translateTplc: only Nat/String literals are handled so far"
   | .fvar .. => throwError "translateTplc: local (non-self) application not yet handled"
   | .proj ``Subtype 0 struct => return .var (← ctx.lookupTerm struct)
+  -- `.val` (field 0) is the identity, same reasoning as `Subtype` just
+  -- above: `Fin n`'s `isLt` field (index 1) is `Prop`-sorted and already
+  -- dropped, so the whole structure erases to exactly its `val`. `.isLt`
+  -- itself reaching a computation position would mean a `Prop` value
+  -- escaped erasure, same as `Subtype`'s `property` — left as a clear
+  -- error rather than guessed at.
+  | .proj ``Fin 0 struct => return .var (← ctx.lookupTerm struct)
   | .proj typeName idx _ =>
     throwError "translateTplc: projection {idx} of {typeName} not yet handled (out of fragment)"
   | .erased => throwError "translateTplc: erased let-value reached D1 (out of fragment)"
@@ -772,6 +821,24 @@ partial def translateCode (ctx : Ctx) : Code → CoreM Tplc.Term
       let resultTy ← translateTy ctx cases.resultType
       let scrutinee := Tplc.Term.unwrap (.var (← ctx.lookupTerm cases.discr))
       return .case resultTy scrutinee [nilBranch, consBranch]
+    -- `Option X`: non-recursive (see `optionSop`), so no `unwrap` on the
+    -- scrutinee at all — same "no wrapping for a 0-field branch" and
+    -- "branch order = declaration order" conventions as `List` above.
+    else if cases.typeName == ``Option then
+      let some noneAlt := cases.alts.find? (fun | .alt n .. => n == ``Option.none | .default _ => false)
+        | throwError "translateTplc: Option cases missing a none alternative"
+      let some (.alt _ someParams someCode) :=
+          cases.alts.find? (fun | .alt n .. => n == ``Option.some | .default _ => false)
+        | throwError "translateTplc: Option cases missing a some alternative"
+      let #[valParam] := someParams
+        | throwError "translateTplc: Option.some alternative has the wrong number of fields"
+      let noneBranch ← translateCode ctx noneAlt.getCode
+      let someCode ← translateCode (ctx.bindTerm valParam.fvarId) someCode
+      let valTy ← translateTy ctx valParam.type
+      let someBranch := Tplc.Term.lamAbs valTy someCode
+      let resultTy ← translateTy ctx cases.resultType
+      let scrutinee := Tplc.Term.var (← ctx.lookupTerm cases.discr)
+      return .case resultTy scrutinee [noneBranch, someBranch]
     else
       throwError "translateTplc: cases on {cases.typeName} not yet handled (out of fragment)"
   | _ => throwError "translateTplc: unsupported Code constructor (not yet handled)"
