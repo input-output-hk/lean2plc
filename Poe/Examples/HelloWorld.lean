@@ -36,17 +36,29 @@ def decodeSignatories : ∀ txInfo, TxInfoOk txInfo → List ByteArray
   | .constr _ (_ :: _ :: _ :: _ :: _ :: _ :: _ :: _ :: sigListData :: _), h =>
       decodeByteStringList sigListData h
 
-/-- `scriptInfo` really is `Constr _ [_, Constr _ [Constr _ [.b owner]]]`
-    — walking down through the `Just`-wrapped, `Datum`-wrapped owner
-    bytes, all the way to `.b`, same reasoning as `RedeemerOk`. -/
+/-- `scriptInfo` really is `Constr 1 [_, Constr 0 [Constr 0 [.b owner]]]` —
+    tag `1` because real `ScriptInfo`'s `SpendingScript` constructor is
+    index 1 (`MintingScript=0, SpendingScript=1, ...`, confirmed directly
+    against `PlutusLedgerApi.V3.Contexts`'s own `makeIsDataSchemaIndexed`
+    call), not a wildcard: `CertifyingScript`/`ProposingScript` also have
+    exactly two fields, so an unchecked tag here would accept a
+    certifying- or proposing-purpose `ScriptContext` as if it were a
+    spending one, silently decoding the wrong bytes as `owner` — exactly
+    the "accept decision depends on the wrong subset of context" bug
+    class (double satisfaction/script-purpose confusion), not a
+    hypothetical one, until this was checked against the real ledger-api
+    source. The inner tag `0` is `Just` (also confirmed against the real
+    ledger: PlutusTx's `Maybe` is indexed `[('Just, 0), ('Nothing, 1)]`,
+    not declaration order), then `0` again for `Datum`'s own
+    single-constructor record. -/
 def ScriptInfoOk (scriptInfo : Data) : Prop :=
   match scriptInfo with
-  | .constr _ [_, .constr _ [.constr _ [.b _]]] => True
+  | .constr 1 [_, .constr 0 [.constr 0 [.b _]]] => True
   | _ => False
 
 /-- `scriptInfo`'s datum owner, given a proof its shape is honest. -/
 def decodeOwner : ∀ scriptInfo, ScriptInfoOk scriptInfo → ByteArray
-  | .constr _ [_, .constr _ [.constr _ [.b ownerBytes]]], _ => ownerBytes
+  | .constr 1 [_, .constr 0 [.constr 0 [.b ownerBytes]]], _ => ownerBytes
 
 /-- `ctx` really has the honest `ScriptContext` shape: `Constr 0
     [txInfo, redeemer, scriptInfo]`, with each of the three sub-trees

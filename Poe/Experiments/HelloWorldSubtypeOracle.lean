@@ -16,7 +16,7 @@ def mkCtxSubtype (msg owner : String) (signatories : List String) : Term :=
     , .b "f4".toUTF8, .b "f5".toUTF8, .b "f6".toUTF8, .b "f7".toUTF8
     , .list (signatories.map (fun s => .b s.toUTF8)) ]
   let redeemer := DataValue.constr 0 [.b msg.toUTF8]
-  let scriptInfo := DataValue.constr 0 [.b "ignored".toUTF8, .constr 0 [.constr 0 [.b owner.toUTF8]]]
+  let scriptInfo := DataValue.constr 1 [.b "ignored".toUTF8, .constr 0 [.constr 0 [.b owner.toUTF8]]]
   .const (.data (.constr 0 [txInfo, redeemer, scriptInfo]))
 
 #eval show Lean.CoreM Unit from do
@@ -46,7 +46,7 @@ def mkCtxSubtypeTplc (msg owner : String) (signatories : List String) : Poe.Tplc
     , .b "f4".toUTF8, .b "f5".toUTF8, .b "f6".toUTF8, .b "f7".toUTF8
     , .list (signatories.map (fun s => .b s.toUTF8)) ]
   let redeemer := DataValue.constr 0 [.b msg.toUTF8]
-  let scriptInfo := DataValue.constr 0 [.b "ignored".toUTF8, .constr 0 [.constr 0 [.b owner.toUTF8]]]
+  let scriptInfo := DataValue.constr 1 [.b "ignored".toUTF8, .constr 0 [.constr 0 [.b owner.toUTF8]]]
   .constant (.data (.constr 0 [txInfo, redeemer, scriptInfo]))
 
 #eval show Lean.CoreM Unit from do

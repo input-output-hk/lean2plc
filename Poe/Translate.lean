@@ -203,6 +203,19 @@ def builtinTable : List (Name × Uplc.Builtin) :=
   -- which only `Int.fdiv` matches — `Int.ediv`/`Int.tdiv`/`/` all give
   -- `-3` for that same input, silently the wrong function.
   , (``Int.fdiv, .divideInteger)
+  -- Needed the moment a `match` pattern uses a literal `Nat` tag > 0 (not
+  -- just `0`): the equation compiler decomposes it via Peano
+  -- decomposition — `Nat.decEq tag 0` for the zero case (already mapped
+  -- above), then `Nat.sub tag 1` + another `Nat.decEq` for the successor
+  -- case — confirmed directly by dumping the generated mono LCNF for
+  -- exactly this shape. Safe to map straight to real integer subtraction
+  -- here specifically because this generated code only ever calls it
+  -- already knowing `tag ≠ 0` (so `tag - 1` can't go negative); a
+  -- user-level `Nat` subtraction relying on `Nat.sub`'s own
+  -- truncate-at-zero semantics (e.g. computing `3 - 5`) would NOT be
+  -- safe to translate this way — this entry is only sound for the
+  -- literal-pattern-matching use case, not `Nat` subtraction in general.
+  , (``Nat.sub, .subtractInteger)
   ]
 
 def applyArgs (f : Uplc.Term) (args : List Uplc.Term) : Uplc.Term :=

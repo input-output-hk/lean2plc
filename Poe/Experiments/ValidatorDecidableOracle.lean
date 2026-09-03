@@ -16,7 +16,7 @@ def mkCtxDecidable (msg owner : String) (signatories : List String) : Term :=
     , .b "f4".toUTF8, .b "f5".toUTF8, .b "f6".toUTF8, .b "f7".toUTF8
     , .list (signatories.map (fun s => .b s.toUTF8)) ]
   let redeemer := DataValue.constr 0 [.b msg.toUTF8]
-  let scriptInfo := DataValue.constr 0 [.b "ignored".toUTF8, .constr 0 [.constr 0 [.b owner.toUTF8]]]
+  let scriptInfo := DataValue.constr 1 [.b "ignored".toUTF8, .constr 0 [.constr 0 [.b owner.toUTF8]]]
   .const (.data (.constr 0 [txInfo, redeemer, scriptInfo]))
 
 /- Confirms the untyped backend's `Decidable`-erasure genuinely produces
@@ -37,7 +37,7 @@ def mkCtxDecidableTplc (msg owner : String) (signatories : List String) : Poe.Tp
     , .b "f4".toUTF8, .b "f5".toUTF8, .b "f6".toUTF8, .b "f7".toUTF8
     , .list (signatories.map (fun s => .b s.toUTF8)) ]
   let redeemer := DataValue.constr 0 [.b msg.toUTF8]
-  let scriptInfo := DataValue.constr 0 [.b "ignored".toUTF8, .constr 0 [.constr 0 [.b owner.toUTF8]]]
+  let scriptInfo := DataValue.constr 1 [.b "ignored".toUTF8, .constr 0 [.constr 0 [.b owner.toUTF8]]]
   .constant (.data (.constr 0 [txInfo, redeemer, scriptInfo]))
 
 /- Same check on the typed backend — needed two real fixes to reach at

@@ -76,13 +76,21 @@ def TxInfoOk (txInfo : Data) : Prop :=
 def decodeSignatories : ∀ txInfo, TxInfoOk txInfo → List ByteArray
   | .constr _ (_ :: _ :: _ :: _ :: _ :: _ :: _ :: _ :: sigListData :: _), h => decodeByteStringList sigListData h
 
+-- Tag `1` (not a wildcard): real ScriptInfo's SpendingScript is index 1
+-- (MintingScript=0, SpendingScript=1, ...), and CertifyingScript/
+-- ProposingScript also have exactly two fields — an unchecked tag here
+-- would accept a certifying/proposing-purpose ScriptContext as a spending
+-- one. Inner tag `0` is Just (PlutusTx's Maybe is indexed
+-- [('Just, 0), ('Nothing, 1)], not declaration order), then `0` again for
+-- Datum's own single-constructor record. All confirmed directly against
+-- PlutusLedgerApi.V3.Contexts's own makeIsDataSchemaIndexed calls.
 def ScriptInfoOk (scriptInfo : Data) : Prop :=
   match scriptInfo with
-  | .constr _ [_, .constr _ [.constr _ [.b _]]] => True
+  | .constr 1 [_, .constr 0 [.constr 0 [.b _]]] => True
   | _ => False
 
 def decodeOwner : ∀ scriptInfo, ScriptInfoOk scriptInfo → ByteArray
-  | .constr _ [_, .constr _ [.constr _ [.b ownerBytes]]], _ => ownerBytes
+  | .constr 1 [_, .constr 0 [.constr 0 [.b ownerBytes]]], _ => ownerBytes
 
 def WellFormed (ctx : Data) : Prop :=
   match ctx with
