@@ -67,8 +67,10 @@ def builtinName : Builtin → String
   | .nullList             => "nullList"
   | .encodeUtf8           => "encodeUtf8"
   | .unConstrData         => "unConstrData"
+  | .unIData              => "unIData"
   | .fstPair              => "fstPair"
   | .sndPair              => "sndPair"
+  | .chooseData           => "chooseData"
 
 /-- `depth` = number of enclosing binders; `var i` names the binder
     introduced at depth `depth - 1 - i`. -/

@@ -76,8 +76,10 @@ inductive Builtin
   | nullList
   | encodeUtf8
   | unConstrData
+  | unIData
   | fstPair
   | sndPair
+  | chooseData
 deriving Repr, BEq, Lean.ToExpr
 
 /-- `Var i` is a de Bruijn index: 0 = innermost enclosing `lam`.

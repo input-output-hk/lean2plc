@@ -146,6 +146,36 @@ def decodeByteStringListTerm : Uplc.Term :=
                  (.app (.builtin .unListData) (.var 0)))
 
 /-!
+## `unListData` boundary: native → SoP `List Data` conversion
+
+`unListData` yields UPLC's *native* builtin list (cons at case-index 0,
+nil at index 1 — the opposite of our SoP `constr` encoding of Lean's
+`List`, which is nil=0/cons=1). `markNative` lets the translator use the
+native `case` shape *within* the function doing the `unListData`, but that
+flag is a local-context property: it does not survive being passed as an
+argument to another top-level function (e.g. `isByteStringListB`'s
+`.list xs => allAreB xs`, where `allAreB` is compiled independently and
+therefore `case`s its parameter with the SoP ordering). Feeding a native
+list into SoP-ordered `case` picks the wrong branch and then applies a
+nullary branch to the cons cell's two fields ("apply non-function").
+
+Fix: walk the native list once at the `unListData` boundary and rebuild it
+as an ordinary SoP `constr`-encoded `List Data` (elements kept as `Data`,
+unchanged), so *everything* downstream — including cross-function calls —
+sees one uniform representation. Same fixpoint/loop shape as
+`decodeByteStringList`, minus the per-element `unBData`. -/
+private def nativeListToSoPBody : Uplc.Term :=
+  let lst : Uplc.Term := .var 0
+  let consBranch :=
+    .lam "h" (.lam "t" (Uplc.Term.constr 1 [.var 1, .app (.var 3) (.var 0)]))
+  let nilBranch := Uplc.Term.constr 0 []
+  .case lst [consBranch, nilBranch]
+
+/-- `(fix loop)` taking a *native* list, returning a SoP `List Data`. -/
+def nativeListToSoPTerm : Uplc.Term :=
+  zFix (.lam "self" (.lam "lst" nativeListToSoPBody))
+
+/-!
 ## Generic `Data`-record accessors: `constrTag`/`field0`/`field1`/`field2`/`field8`
 
 Real records like `ScriptContext`/`TxInfo` are just `Constr tag [field0,
@@ -389,39 +419,116 @@ partial def translateCode (ctx : Ctx) : Code → CoreM Uplc.Term
       -- whichever delayed branch it returns.
       return .force (.app (.app (.app (.force (.builtin .ifThenElse)) discr) (.delay thenBranch)) (.delay elseBranch))
     else if cases.typeName == ``Poe.PlutusData.Data then
-      -- `Data` is UPLC's builtin `data` type at runtime, not a Poe SoP
-      -- `constr` value — real `case` can't dispatch on it at all (see
-      -- `singleRealAlt`'s doc comment). Every real use here is guarded by
-      -- an erased shape proof, so instead of a dispatch: trust the one
-      -- live branch and apply the matching `un*Data` accessor directly,
-      -- unconditionally. `constr`'s fields list comes back from
-      -- `unConstrData` as a *native* UPLC list (`fieldsOfTerm`, via
-      -- `sndPair`) — marked so a further nested destructure of it uses
-      -- the native-list convention below, not the generic SoP one.
-      let (ctorName, allParams, code) ← singleRealAlt cases
-      let params := allParams.filter fun p => !p.type.isErased
-      match ctorName, params with
-      | ``Poe.PlutusData.Data.constr, #[tagParam, fieldsParam] =>
-        let ctx' := (ctx.bind tagParam.fvarId).bind fieldsParam.fvarId |>.markNative fieldsParam.fvarId
-        let body ← translateCode ctx' code
-        -- Both values must apply from *outside* the lambdas they fill, as
-        -- siblings in `.app` nodes (`applyArgs`'s usual convention) — not
-        -- nested inside an inner lambda's body, which would shift the
-        -- de Bruijn index `discr` was computed against (caught directly:
-        -- placing `fieldsOfTerm discr` inside the tag-lambda's body made
-        -- `uplc` apply `unConstrData` to the tag integer instead of the
-        -- real `Data` value).
-        return applyArgs (.lam tagParam.binderName.toString (.lam fieldsParam.binderName.toString body))
-          [constrTagTerm discr, fieldsOfTerm discr]
-      | ``Poe.PlutusData.Data.b, #[byteParam] =>
-        let body ← translateCode (ctx.bind byteParam.fvarId) code
-        return .app (.lam byteParam.binderName.toString body) (.app (.builtin .unBData) discr)
-      | ``Poe.PlutusData.Data.list, #[listParam] =>
-        let body ← translateCode ((ctx.bind listParam.fvarId).markNative listParam.fvarId) code
-        return .app (.lam listParam.binderName.toString body) (.app (.builtin .unListData) discr)
-      | ``Poe.PlutusData.Data.i, _ =>
-        throwError "translator: Data.i (integer-as-Data) not yet handled (out of fragment)"
-      | _, _ => throwError "translator: unexpected Data constructor {ctorName}"
+      -- `Data` is UPLC's builtin `data` type — real UPLC `case` can't dispatch
+      -- on it at all (confirmed: the CLI rejects `case` on a builtin-typed value).
+      -- Two paths: (A) fast path when exactly one branch is live (all others are
+      -- `unreach` because a ghost proof rules them out) — just apply the right
+      -- `un*Data` accessor unconditionally; (B) multi-branch path when there are
+      -- genuinely multiple live branches (e.g. `| .constr _ _ => ... | _ => false`)
+      -- — use the `chooseData` builtin to dispatch at runtime:
+      --   `(force (chooseData d c_branch m_branch l_branch i_branch b_branch))`
+      -- where `a := Unit → result` (each branch is delayed, outer force forces it).
+      -- The constructor order for `chooseData` is: constr, map, list, int, bytes.
+      let isUnreach : Alt → Bool
+        | .alt _ _ (.unreach _) => true
+        | .default (.unreach _) => true
+        | _ => false
+      match cases.alts.filter (!isUnreach ·) with
+      | #[.alt ctorName allParams code] =>
+        -- Fast path: one live branch, apply the matching `un*Data` unconditionally.
+        let params := allParams.filter fun p => !p.type.isErased
+        match ctorName, params with
+        | ``Poe.PlutusData.Data.constr, #[tagParam, fieldsParam] =>
+          let ctx' := (ctx.bind tagParam.fvarId).bind fieldsParam.fvarId |>.markNative fieldsParam.fvarId
+          let body ← translateCode ctx' code
+          -- Both values must apply from *outside* the lambdas they fill, as
+          -- siblings in `.app` nodes (`applyArgs`'s usual convention) — not
+          -- nested inside an inner lambda's body, which would shift the
+          -- de Bruijn index `discr` was computed against (caught directly:
+          -- placing `fieldsOfTerm discr` inside the tag-lambda's body made
+          -- `uplc` apply `unConstrData` to the tag integer instead of the
+          -- real `Data` value).
+          return applyArgs (.lam tagParam.binderName.toString (.lam fieldsParam.binderName.toString body))
+            [constrTagTerm discr, fieldsOfTerm discr]
+        | ``Poe.PlutusData.Data.b, #[byteParam] =>
+          let body ← translateCode (ctx.bind byteParam.fvarId) code
+          return .app (.lam byteParam.binderName.toString body) (.app (.builtin .unBData) discr)
+        | ``Poe.PlutusData.Data.list, #[listParam] =>
+          -- Convert native → SoP at the `unListData` boundary (see
+          -- `nativeListToSoPTerm`): bind as an ordinary SoP `List Data`, not
+          -- native, so downstream code (incl. cross-function calls) is uniform.
+          let body ← translateCode (ctx.bind listParam.fvarId) code
+          return .app (.lam listParam.binderName.toString body)
+            (.app nativeListToSoPTerm (.app (.builtin .unListData) discr))
+        | ``Poe.PlutusData.Data.i, _ =>
+          throwError "translator: Data.i (integer-as-Data) not yet handled (out of fragment)"
+        | _, _ => throwError "translator: unexpected Data constructor {ctorName}"
+      | _ =>
+        -- Multi-branch path: build a `chooseData` dispatch.
+        -- `defaultTerm` is the translation of the `.default` alt (or `error` if none).
+        let defaultTerm : Uplc.Term ← do
+          match cases.alts.find? (fun | .default _ => true | _ => false) with
+          | some (.default dc) => translateCode ctx dc
+          | _                  => pure Uplc.Term.error
+        let findAlt (ctorName : Name) : Option (Array Param × Code) :=
+          match cases.alts.find? (fun | .alt n .. => n == ctorName | _ => false) with
+          | some (.alt _ ps c) => some (ps, c)
+          | _                  => none
+        -- Constr branch: bind tag + fields via unConstrData, same convention as fast path.
+        -- NOTE: use `pure` not `return` here — `return` inside a `let x ← do { ... }` block
+        -- escapes to the outer `translateCode` `do` scope in Lean 4's do-notation. `pure`
+        -- stays local to the inner block and binds `constrBranch` correctly.
+        let constrBranch : Uplc.Term ← do
+          match findAlt ``Poe.PlutusData.Data.constr with
+          | some (allPs, c) =>
+            let ps := allPs.filter fun p => !p.type.isErased
+            match ps with
+            | #[tagParam, fieldsParam] =>
+              let ctx' := (ctx.bind tagParam.fvarId).bind fieldsParam.fvarId
+                            |>.markNative fieldsParam.fvarId
+              let body ← translateCode ctx' c
+              pure (applyArgs (.lam tagParam.binderName.toString (.lam fieldsParam.binderName.toString body))
+                [constrTagTerm discr, fieldsOfTerm discr])
+            | _ => throwError "translator: Data.constr alt in multi-branch has unexpected param shape"
+          | none => pure defaultTerm
+        -- List branch: bind via unListData.
+        let listBranch : Uplc.Term ← do
+          match findAlt ``Poe.PlutusData.Data.list with
+          | some (allPs, c) =>
+            let ps := allPs.filter fun p => !p.type.isErased
+            match ps with
+            | #[listParam] =>
+              -- Convert native → SoP at the `unListData` boundary (see
+              -- `nativeListToSoPTerm`) — same reasoning as the single-branch
+              -- `.list` fast path above.
+              let body ← translateCode (ctx.bind listParam.fvarId) c
+              pure (.app (.lam listParam.binderName.toString body)
+                (.app nativeListToSoPTerm (.app (.builtin .unListData) discr)))
+            | _ => throwError "translator: Data.list alt in multi-branch has unexpected param shape"
+          | none => pure defaultTerm
+        -- Bytes branch: bind via unBData.
+        let bytesBranch : Uplc.Term ← do
+          match findAlt ``Poe.PlutusData.Data.b with
+          | some (allPs, c) =>
+            let ps := allPs.filter fun p => !p.type.isErased
+            match ps with
+            | #[byteParam] =>
+              let body ← translateCode (ctx.bind byteParam.fvarId) c
+              pure (.app (.lam byteParam.binderName.toString body) (.app (.builtin .unBData) discr))
+            | _ => throwError "translator: Data.b alt in multi-branch has unexpected param shape"
+          | none => pure defaultTerm
+        -- Int branch: needs unIData (not yet in Poe's builtin set).
+        let intBranch : Uplc.Term ← do
+          match findAlt ``Poe.PlutusData.Data.i with
+          | some _ => throwError "translator: Data.i with explicit alt requires unIData (not yet handled)"
+          | none   => pure defaultTerm
+        -- Map branch: no Data.map constructor in Poe's type — always use default.
+        let mapBranch := defaultTerm
+        -- (force [[[[[(force (builtin chooseData)) discr]
+        --   (delay constr)] (delay map)] (delay list)] (delay int)] (delay bytes)])
+        return .force (applyArgs (.force (.builtin .chooseData))
+          [discr, .delay constrBranch, .delay mapBranch,
+           .delay listBranch, .delay intBranch, .delay bytesBranch])
     else if cases.typeName == ``List && ctx.isNative cases.discr then
       -- Native UPLC list (see `Ctx.nativeListVars`'s doc comment): `case`
       -- takes exactly two alternatives here, the *opposite* order/shape
@@ -463,6 +570,20 @@ partial def translateCode (ctx : Ctx) : Code → CoreM Uplc.Term
           return (List.range info.numFields).foldr (init := branchBody)
             fun i acc => .lam s!"_default{i}" acc
       return .case discr branches
+  -- Join points (`jp`/`jmp`) appear when the compiler shares a continuation
+  -- between multiple branches (e.g. Lean's `&&` short-circuit).
+  -- Translation: bind the jp as a local lambda, call it at each `jmp` site.
+  -- Same de Bruijn convention as `.let`: the lambda argument sits at the
+  -- current depth, the continuation body at depth+1.
+  | .jp decl k => do
+    let jpParams := decl.params.filter fun p => !p.type.isErased
+    let jpParamCtx := jpParams.foldl (init := ctx) (·.bind ·.fvarId)
+    let jpBody ← translateCode jpParamCtx decl.value
+    let jpTerm := jpParams.foldr (init := jpBody) fun p acc => .lam p.binderName.toString acc
+    let kBody ← translateCode (ctx.bind decl.fvarId) k
+    return .app (.lam decl.binderName.toString kBody) jpTerm
+  | .jmp fvarId args =>
+    return applyArgs (.var (← ctx.lookup fvarId)) (← translateArgs ctx args)
   | _ => throwError "translator: unsupported Code constructor (not yet handled)"
 
 partial def translateDecl (decl : Decl) : CoreM Uplc.Term := do

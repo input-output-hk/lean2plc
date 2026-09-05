@@ -70,8 +70,10 @@ def toBlasterBuiltin : Poe.Uplc.Builtin → Term.BuiltinFun
   | .nullList => .NullList
   | .encodeUtf8 => .EncodeUtf8
   | .unConstrData => .UnConstrData
+  | .unIData => .UnIData
   | .fstPair => .FstPair
   | .sndPair => .SndPair
+  | .chooseData => .ChooseData
 
 /-- See the file doc comment: `bytestring`/`data` are the one real gap,
     `ByteArray` has no honest total embedding into Blaster's
