@@ -1,4 +1,5 @@
 import Poe.Experiments.ValidatorStyles
+import Poe.Experiments.HelloWorldParsed
 import Poe.Oracle
 import Poe.TplcOracle
 
@@ -105,5 +106,39 @@ styles 1 and 4. -/
 #eval show Lean.CoreM Unit from do
   Poe.TplcOracle.runSuite ``Poe.Experiments.HelloWorldSubtype.validatorBSubtypePost
     [([okCtxTplc], .bool true), ([wrongMsgCtxTplc], .bool false), ([wrongOwnerCtxTplc], .bool false)]
+
+/-! ## Flat-encoded sizes
+
+`uplc convert --of hex` gives hex output; `length / 2` = bytes.
+Aiken's reference (285 bytes) is from the official `hello_world` example.
+-/
+
+private def flatSize (declName : Lean.Name) : Lean.CoreM Nat := do
+  let term ← Poe.Translate.translate declName
+  let progText := Poe.Emit.emit term
+  let hex ← IO.Process.run
+    { cmd := "uplc", args := #["convert", "--if", "textual", "--of", "hex"] }
+    (some progText)
+  return hex.trim.length / 2
+
+/-! `HelloWorldParsed.validatorE` (style 2E) decides `WellFormed` at the
+entry point via `wellFormedB`, which pattern-matches on `Data` with two
+reachable arms — that goes through the translator's `chooseData` multi-branch
+path plus the native→SoP list conversion at the `unListData` boundary (see
+`Poe.Translate.nativeListToSoPTerm`). It's the largest of the group because it
+runs the full wellformedness check *and* re-decodes the fields, but it is in
+the fragment and evaluates correctly (see `HelloWorldParsedOracle.lean`). -/
+
+#eval show Lean.CoreM Unit from do
+  let s1E ← flatSize ``Poe.Examples.HelloWorld.validatorE
+  let s2E ← flatSize ``Poe.Experiments.HelloWorldParsed.validatorE
+  let s3E ← flatSize ``Poe.Experiments.ValidatorDecidable.validatorEDecidable
+  let s4E ← flatSize ``Poe.Experiments.HelloWorldSubtype.validatorBSubtype
+  IO.println "Flat-encoded sizes (bytes):"
+  IO.println s!"  Aiken hello_world (reference):  285"
+  IO.println s!"  style4E / style5E (Subtype):     {s4E}"
+  IO.println s!"  style1E (Bool, ghost wf):        {s1E}"
+  IO.println s!"  style2E (Parsed, decided wf):     {s2E}"
+  IO.println s!"  style3E (Decidable):             {s3E}"
 
 end Poe.Experiments.ValidatorStyles
